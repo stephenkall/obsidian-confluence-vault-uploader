@@ -1,0 +1,22 @@
+{
+  "name": "obsidian-confluence-vault-uploader",
+  "version": "0.0.1",
+  "description": "Obsidian plugin to upload an entire vault to Confluence.",
+  "main": "main.js",
+  "scripts": {
+    "build": "rollup -c",
+    "watch": "rollup -c -w"
+  },
+  "dependencies": {
+    "marked": "^5.0.0"
+  },
+  "devDependencies": {
+    "@rollup/plugin-commonjs": "^25.0.0",
+    "@rollup/plugin-node-resolve": "^15.0.0",
+    "@types/marked": "^5.0.0",
+    "rollup": "^3.0.0",
+    "rollup-plugin-typescript2": "^0.34.0",
+    "typescript": "^5.0.0"
+  },
+  "license": "MIT"
+}
