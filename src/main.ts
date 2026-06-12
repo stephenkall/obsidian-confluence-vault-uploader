@@ -752,7 +752,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
           const updatePayload = {
             id: pageId,
             status: 'current',
-            title,
+            title: pageData.title, // use actual Confluence title, not the pageMap key (which is the vault path)
             body: {
               value: content,
               representation: 'storage'
