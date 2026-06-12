@@ -350,9 +350,11 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
 
     let processedMarkdown = markdown;
 
-    // Remove Obsidian embeds ![[...]] as they won't work in Confluence
-    processedMarkdown = processedMarkdown.replace(/!\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (match, name) => {
-      return `_[Embed: ${name}]_`;
+    // Convert Obsidian embeds ![[File]] to links — Phase 2 will resolve them to Confluence URLs
+    processedMarkdown = processedMarkdown.replace(/!\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (match, name, alt) => {
+      const cleanName = name.trim();
+      const display = (alt || cleanName).trim();
+      return `[${display}](OBSIDIAN_LINK:${cleanName})`;
     });
 
     // Convert Obsidian wiki links [[Page Name]] to temporary placeholders
