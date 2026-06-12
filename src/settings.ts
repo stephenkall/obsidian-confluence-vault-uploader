@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from 'obsidian';
+import { App, PluginSettingTab, Setting, Notice, requestUrl } from 'obsidian';
 import ConfluenceVaultUploaderPlugin from './main';
 
 export interface ConfluenceVaultUploaderSettings {
@@ -6,7 +6,9 @@ export interface ConfluenceVaultUploaderSettings {
   username: string;
   apiToken: string;
   spaceKey: string;
-  parentPageId: string;
+  rootPageId: string;
+  rootPageTitle?: string;
+  rootPageUrl?: string;
 }
 
 export const DEFAULT_SETTINGS: ConfluenceVaultUploaderSettings = {
@@ -14,7 +16,9 @@ export const DEFAULT_SETTINGS: ConfluenceVaultUploaderSettings = {
   username: '',
   apiToken: '',
   spaceKey: '',
-  parentPageId: ''
+  rootPageId: '',
+  rootPageTitle: '',
+  rootPageUrl: ''
 };
 
 export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
@@ -60,40 +64,135 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Confluence API token')
       .setDesc('Use an API token for auth. Keep it secret.')
-      .addText(text =>
+      .addText(text => {
         text
           .setPlaceholder('API token')
           .setValue(this.plugin.settings.apiToken)
           .onChange(async value => {
             this.plugin.settings.apiToken = value.trim();
             await this.plugin.saveSettings();
+          });
+        (text as any).inputEl.type = 'password';
+        return text;
+      });
+
+    new Setting(containerEl)
+      .setName('Root page URL (Optional)')
+      .setDesc('Paste the full page URL to sync from a specific page. Leave empty to sync from space root. The space key will be extracted from the URL.')
+      .addText(text =>
+        text
+          .setPlaceholder('https://your-domain.atlassian.net/wiki/spaces/SPACE/pages/12345678/Page+Name')
+          .setValue(this.plugin.settings.rootPageUrl || '')
+          .onChange(async value => {
+            this.plugin.settings.rootPageUrl = value.trim();
+            if (value.trim()) {
+              const { pageId, spaceKey } = this.extractPageAndSpaceFromUrl(value.trim());
+              if (pageId && spaceKey) {
+                this.plugin.settings.rootPageId = pageId;
+                this.plugin.settings.spaceKey = spaceKey;
+                new Notice(`✅ Extracted: Space=${spaceKey}, PageID=${pageId}`);
+              } else {
+                this.plugin.settings.rootPageId = '';
+                this.plugin.settings.spaceKey = '';
+                new Notice('❌ Could not extract page ID and space key from URL');
+              }
+            } else {
+              this.plugin.settings.rootPageId = '';
+              this.plugin.settings.spaceKey = '';
+            }
+            await this.plugin.saveSettings();
+            this.display();
           })
       );
 
-    new Setting(containerEl)
-      .setName('Confluence space key')
-      .setDesc('The Confluence space where pages will be created/updated')
-      .addText(text =>
-        text
-          .setPlaceholder('SPACE')
-          .setValue(this.plugin.settings.spaceKey)
-          .onChange(async value => {
-            this.plugin.settings.spaceKey = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
+    if (this.plugin.settings.rootPageId) {
+      containerEl.createEl('p', {
+        text: `✅ Selected: Space=${this.plugin.settings.spaceKey}, PageID=${this.plugin.settings.rootPageId}`,
+        cls: 'setting-item-description'
+      });
+    }
 
     new Setting(containerEl)
-      .setName('Confluence parent page ID')
-      .setDesc('Upload pages under this parent page in Confluence')
-      .addText(text =>
-        text
-          .setPlaceholder('123456789')
-          .setValue(this.plugin.settings.parentPageId)
-          .onChange(async value => {
-            this.plugin.settings.parentPageId = value.trim();
-            await this.plugin.saveSettings();
+      .setName('Test Connection')
+      .setDesc('Verify Confluence credentials and page access')
+      .addButton(button =>
+        button
+          .setButtonText('Test')
+          .onClick(async () => {
+            await this.testConnection();
           })
       );
+  }
+
+  private extractPageAndSpaceFromUrl(url: string): { pageId: string; spaceKey: string } {
+    const pageIdMatch = url.match(/\/pages\/(\d+)/);
+    const spaceKeyMatch = url.match(/\/spaces\/([A-Z0-9_]+)/i);
+
+    return {
+      pageId: pageIdMatch && pageIdMatch[1] ? pageIdMatch[1] : '',
+      spaceKey: spaceKeyMatch && spaceKeyMatch[1] ? spaceKeyMatch[1] : ''
+    };
+  }
+
+  private async testConnection() {
+    let { confluenceBaseUrl, username, apiToken, rootPageId, spaceKey } = this.plugin.settings;
+
+    if (!confluenceBaseUrl || !username || !apiToken) {
+      new Notice('❌ Please fill in URL, username, and API token first.');
+      return;
+    }
+
+    new Notice('Testing connection...');
+
+    try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        Authorization: `Basic ${btoa(`${username}:${apiToken}`)}`
+      };
+
+      const baseUrl = this.getBaseUrl();
+      const url = `${baseUrl}/rest/api/content?limit=1`;
+
+      const response = await requestUrl({
+        url,
+        method: 'GET',
+        headers
+      });
+
+      if (response.status < 200 || response.status >= 300) {
+        new Notice(`❌ Connection failed (${response.status})`);
+        return;
+      }
+
+      // Connection successful, now check page if specified
+      if (rootPageId && spaceKey) {
+        new Notice('Validating page access...');
+        const pageUrl = `${baseUrl}/rest/api/content/${rootPageId}`;
+        const pageResponse = await requestUrl({
+          url: pageUrl,
+          method: 'GET',
+          headers
+        });
+
+        if (pageResponse.status >= 200 && pageResponse.status < 300) {
+          const pageData = pageResponse.json;
+          new Notice(`✅ Connection successful! Page found: ${pageData.title}`);
+        } else {
+          new Notice(`❌ Could not access page (${pageResponse.status}). Please check the URL.`);
+        }
+      } else {
+        new Notice('✅ Connection successful! (No page URL specified)');
+      }
+    } catch (error) {
+      new Notice(`❌ Connection failed: ${error}`);
+    }
+  }
+
+  private getBaseUrl(): string {
+    let url = this.plugin.settings.confluenceBaseUrl.trim();
+    if (!url.endsWith('/wiki') && !url.includes('/wiki/')) {
+      url = url.replace(/\/$/, '') + '/wiki';
+    }
+    return url.replace(/\/$/, '');
   }
 }
