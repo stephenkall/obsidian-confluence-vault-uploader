@@ -16,7 +16,6 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
   private pageVersions: Record<string, number> = {}; // pageId → version for updates
   private isSyncing: boolean = false;
   private spaceId: string = '';
-  private skipFiles: Set<string> = new Set(); // Files to skip (MOC files used as folder content)
   private processedFiles: Set<string> = new Set(); // Track synced files for resumability
 
   async onload() {
@@ -125,29 +124,11 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
 
       console.log(`[Confluence Sync] Starting: ${files.length} total files, ${this.processedFiles.size} already synced`);
       this.pageCache = {};
-      this.skipFiles = new Set();
-
-      // Build map of folder paths to their underscore files for immediate updates
-      const folderUnderscoreMap: Record<string, TFile> = {};
-      const normalFiles: TFile[] = [];
-      for (const file of files) {
-        if (file.basename.startsWith('_')) {
-          // Map folder path → underscore file
-          const folderPath = file.parent?.path || '';
-          folderUnderscoreMap[folderPath] = file;
-          console.log(`[Confluence Sync] Underscore file (will update parent immediately): ${file.path}`);
-        } else {
-          normalFiles.push(file);
-        }
-      }
-      (this as any).folderUnderscoreMap = folderUnderscoreMap;
-
       let successCount = 0;
       let failureCount = 0;
-      const filesToSync = normalFiles.filter(f => !this.processedFiles.has(f.path));
+      const filesToSync = files.filter(f => !this.processedFiles.has(f.path));
 
-      // Phase 1: Create/sync all normal pages and folder hierarchy
-      new Notice(`📄 Phase 1: Creating ${filesToSync.length} page(s)...`);
+      new Notice(`📄 Syncing ${filesToSync.length} file(s)...`);
       for (let i = 0; i < filesToSync.length; i++) {
         if (!this.isSyncing) {
           console.log(`[Confluence Sync] Stopped by user at file ${i + 1}/${filesToSync.length}`);
@@ -160,13 +141,12 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
         const progress = `(${i + 1}/${filesToSync.length})`;
         try {
           console.log(`[Confluence Sync] Processing: ${file.path}`);
-          new Notice(`⏳ Phase 1 ${progress}: ${file.basename}...`, 2000);
+          new Notice(`⏳ ${progress}: ${file.basename}...`, 2000);
           await this.syncFile(file);
           this.processedFiles.add(file.path);
           successCount += 1;
           console.log(`[Confluence Sync] ✅ Success: ${file.path}`);
 
-          // Auto-save state every 10 files
           if (successCount % 10 === 0) {
             await this.saveSyncState();
           }
@@ -177,8 +157,8 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
         }
       }
 
-      // Phase 2: Update links in all pages (most underscore files already processed in Phase 1)
-      new Notice('🔗 Phase 2: Updating links...');
+      // Phase 2: Update links in all pages
+      new Notice('🔗 Updating links...');
       console.log(`[Confluence Sync] Page map with ${Object.keys(this.pageMap).length} entries`);
       await this.updateAllPageLinks();
 
@@ -287,7 +267,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
 
       if (!this.pageCache[currentPath]) {
         const parentPageId = parentId || this.settings.rootPageId || '';
-        const pageId = await this.findOrCreateFolderPage(part, parentPageId, currentPath);
+        const pageId = await this.findOrCreateFolderPage(part, parentPageId);
         this.pageCache[currentPath] = { id: pageId, version: 1 };
       }
 
@@ -297,64 +277,23 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     return parentId;
   }
 
-  private async findOrCreateFolderPage(folderName: string, parentPageId: string, folderPath?: string): Promise<string> {
+  private async findOrCreateFolderPage(folderName: string, parentPageId: string): Promise<string> {
     console.log(`[findOrCreateFolderPage] Looking for folder: ${folderName} (parent: ${parentPageId || 'root'})`);
     const existing = await this.findPageByTitle(folderName, parentPageId);
     if (existing) {
       console.log(`[findOrCreateFolderPage] Found existing folder: ${folderName} (id: ${existing.id})`);
-
-      // Check if there's an underscore file to update this folder with
-      if (folderPath) {
-        const folderUnderscoreMap = (this as any).folderUnderscoreMap as Record<string, TFile>;
-        const underscoreFile = folderUnderscoreMap && folderUnderscoreMap[folderPath];
-        if (underscoreFile) {
-          console.log(`[findOrCreateFolderPage] Found underscore file for existing folder: ${underscoreFile.path}`);
-          let mocContent = await this.app.vault.read(underscoreFile);
-          mocContent = this.removeFrontmatter(mocContent);
-          const body = this.buildMarkdownBody(mocContent);
-          await this.updatePageContent(existing.id, body);
-          console.log(`[findOrCreateFolderPage] ✅ Updated existing folder with underscore content`);
-          this.processedFiles.add(underscoreFile.path);
-        }
-      }
-
       return existing.id;
     }
 
     console.log(`[findOrCreateFolderPage] Creating new folder: ${folderName}`);
-
-    // Create folder page, potentially with underscore file content
-    let body = {
-      value: '',
-      representation: 'storage'
-    };
-
-    // Check if there's an underscore file for this folder
-    if (folderPath) {
-      const folderUnderscoreMap = (this as any).folderUnderscoreMap as Record<string, TFile>;
-      const underscoreFile = folderUnderscoreMap && folderUnderscoreMap[folderPath];
-      if (underscoreFile) {
-        console.log(`[findOrCreateFolderPage] Found underscore file for new folder: ${underscoreFile.path}`);
-        let mocContent = await this.app.vault.read(underscoreFile);
-        mocContent = this.removeFrontmatter(mocContent);
-        body = this.buildMarkdownBody(mocContent);
-        console.log(`[findOrCreateFolderPage] Will create folder with underscore content (${body.value.length} chars)`);
-        // Mark underscore file as processed so Phase 2 doesn't process it again
-        this.processedFiles.add(underscoreFile.path);
-      }
-    }
-
     const url = `${this.getConfluenceBaseUrl()}/api/v2/pages`;
     const payload: any = {
       spaceId: this.spaceId,
       status: 'current',
       title: folderName,
-      body
+      body: { value: '', representation: 'storage' }
     };
-
-    if (parentPageId) {
-      payload.parentId = parentPageId;
-    }
+    if (parentPageId) payload.parentId = parentPageId;
 
     const response = await this.requestConfluence(url, 'POST', payload);
     console.log(`[findOrCreateFolderPage] Created folder: ${folderName} (id: ${response.id})`);
