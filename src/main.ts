@@ -184,9 +184,18 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       }
 
       // Phase 2: Update links in all pages
+      if (!this.isSyncing) {
+        await this.saveSyncState();
+        return;
+      }
       new Notice('🔗 Updating links...');
       console.log(`[Confluence Sync] Page map with ${Object.keys(this.pageMap).length} entries`);
       await this.updateAllPageLinks();
+
+      if (!this.isSyncing) {
+        // Was stopped during Phase 2 — state already saved inside updateAllPageLinks
+        return;
+      }
 
       await this.saveSyncState();
 
@@ -331,11 +340,6 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
   }
 
   buildMarkdownBody(markdown: string): { value: string; representation: string } {
-    marked.setOptions({
-      mangle: false,
-      headerIds: false
-    });
-
     // Normalize line endings to LF for consistent regex matching
     markdown = markdown.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
@@ -646,6 +650,13 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
         // Fetch current page to get content and version
         const url = `${this.getConfluenceBaseUrl()}/api/v2/pages/${pageId}`;
         const pageData = await this.requestConfluence(url, 'GET');
+
+        // Check stop again after async GET (more responsive)
+        if (!this.isSyncing) {
+          await this.saveSyncState();
+          new Notice(`⏹️ Link update paused. ${updated} pages updated so far.`);
+          return;
+        }
 
         if (!pageData.body?.storage?.value) {
           console.log(`[updateAllPageLinks] Page ${title} (${pageId}) has no body, skipping`);
