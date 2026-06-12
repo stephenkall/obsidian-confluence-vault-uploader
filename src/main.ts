@@ -39,6 +39,30 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       callback: () => this.clearCache()
     });
 
+    this.addCommand({
+      id: 'update-confluence-links',
+      name: 'Update Confluence page links (Phase 2)',
+      callback: async () => {
+        if (this.isSyncing) {
+          new Notice('⚠️ Sync already in progress.');
+          return;
+        }
+        const pageCount = Object.keys(this.pageMap).length;
+        if (pageCount === 0) {
+          new Notice('⚠️ No synced pages found. Run "Sync vault" first.');
+          return;
+        }
+        this.isSyncing = true;
+        new Notice(`🔗 Updating links in ${pageCount} pages...`);
+        try {
+          await this.updateAllPageLinks();
+          await this.saveSyncState();
+        } finally {
+          this.isSyncing = false;
+        }
+      }
+    });
+
     this.addSettingTab(new ConfluenceVaultUploaderSettingTab(this.app, this));
   }
 
@@ -245,8 +269,12 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
   }
 
   private removeFrontmatter(markdown: string): string {
-    const frontmatterRegex = /^---\n([\s\S]*?)\n---\n/;
-    return markdown.replace(frontmatterRegex, '');
+    // Normalize CRLF to LF first
+    const normalized = markdown.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    // Match frontmatter block: --- at start, then any content, then closing ---
+    // The closing --- may or may not be followed by a newline
+    const stripped = normalized.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    return stripped.trimStart();
   }
 
   private async ensureParentPath(folder: TFolder | null): Promise<string> {
@@ -307,6 +335,9 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       mangle: false,
       headerIds: false
     });
+
+    // Normalize line endings to LF for consistent regex matching
+    markdown = markdown.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
     // Convert Obsidian callouts [!type] to Confluence info macros BEFORE parsing markdown
     // Callout format: > [!type] optional title\n> content lines
