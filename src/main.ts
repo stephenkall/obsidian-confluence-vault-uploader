@@ -652,8 +652,8 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       }
 
       try {
-        // Fetch current page to get content and version
-        const url = `${this.getConfluenceBaseUrl()}/api/v2/pages/${pageId}`;
+        // Fetch current page content — must request body-format=storage explicitly
+        const url = `${this.getConfluenceBaseUrl()}/api/v2/pages/${pageId}?body-format=storage`;
         const pageData = await this.requestConfluence(url, 'GET');
 
         // Check stop again after async GET (more responsive)
