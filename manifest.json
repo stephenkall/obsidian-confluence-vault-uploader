@@ -3,7 +3,7 @@
   "name": "Confluence Vault Uploader",
   "version": "0.0.29",
   "minAppVersion": "1.4.0",
-  "description": "Push an entire Obsidian vault into a custom Confluence parent page using Confluence REST API.",
+  "description": "Sync your vault to Confluence, preserving folder structure as a page hierarchy with working cross-page links.",
   "author": "stephenkall",
   "authorUrl": "https://github.com/stephenkall",
   "isDesktopOnly": false
