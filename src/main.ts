@@ -308,9 +308,31 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       headerIds: false
     });
 
+    // Convert Obsidian callouts [!type] to Confluence info macros BEFORE parsing markdown
+    // Callout format: > [!type] optional title\n> content lines
+    let processedMarkdown = markdown.replace(
+      /> \[!(note|tip|warning|info|important|caution|danger|error|success|check|question|quote|abstract|summary|todo|bug|example|faq|help|hint|attention)\](.*?)?\n((?:>.*\n?)*)/gi,
+      (match, type, title, body) => {
+        const calloutMap: Record<string, string> = {
+          note: 'note', tip: 'tip', info: 'info', important: 'note',
+          warning: 'warning', caution: 'warning', attention: 'warning',
+          danger: 'warning', error: 'warning',
+          success: 'tip', check: 'tip', hint: 'tip',
+          question: 'note', faq: 'note', help: 'note',
+          quote: 'note', abstract: 'note', summary: 'note',
+          todo: 'note', bug: 'warning', example: 'info'
+        };
+        const macroType = calloutMap[type.toLowerCase()] || 'info';
+        const titleText = title?.trim() || '';
+        const content = body.replace(/^> ?/gm, '').trim();
+        const titleAttr = titleText ? ` ac:title="${titleText}"` : '';
+        return `\n<ac:structured-macro ac:name="${macroType}"${titleAttr}><ac:rich-text-body><p>${content}</p></ac:rich-text-body></ac:structured-macro>\n`;
+      }
+    );
+
     // Remove Obsidian embeds ![[...]] as they won't work in Confluence
-    let processedMarkdown = markdown.replace(/!\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (match, name) => {
-      return `_[Embed: ${name}]_`; // Convert to italicized reference
+    processedMarkdown = processedMarkdown.replace(/!\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (match, name) => {
+      return `_[Embed: ${name}]_`;
     });
 
     // Convert Obsidian wiki links [[Page Name]] to temporary placeholders
