@@ -283,7 +283,8 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     // Match frontmatter block: --- at start, then any content, then closing ---
     // The closing --- may or may not be followed by a newline
     const stripped = normalized.replace(/^---\n[\s\S]*?\n---\n?/, '');
-    return stripped.trimStart();
+    // trimStart removes leading whitespace; also strip lone asterisk-only lines (e.g. stray ** )
+    return stripped.trimStart().replace(/^\*+\n/, '');
   }
 
   private async ensureParentPath(folder: TFolder | null): Promise<string> {
@@ -343,27 +344,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     // Normalize line endings to LF for consistent regex matching
     markdown = markdown.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
-    // Convert Obsidian callouts [!type] to Confluence info macros BEFORE parsing markdown
-    // Callout format: > [!type] optional title\n> content lines
-    let processedMarkdown = markdown.replace(
-      /> \[!(note|tip|warning|info|important|caution|danger|error|success|check|question|quote|abstract|summary|todo|bug|example|faq|help|hint|attention)\](.*?)?\n((?:>.*\n?)*)/gi,
-      (match, type, title, body) => {
-        const calloutMap: Record<string, string> = {
-          note: 'note', tip: 'tip', info: 'info', important: 'note',
-          warning: 'warning', caution: 'warning', attention: 'warning',
-          danger: 'warning', error: 'warning',
-          success: 'tip', check: 'tip', hint: 'tip',
-          question: 'note', faq: 'note', help: 'note',
-          quote: 'note', abstract: 'note', summary: 'note',
-          todo: 'note', bug: 'warning', example: 'info'
-        };
-        const macroType = calloutMap[type.toLowerCase()] || 'info';
-        const titleText = title?.trim() || '';
-        const content = body.replace(/^> ?/gm, '').trim();
-        const titleAttr = titleText ? ` ac:title="${titleText}"` : '';
-        return `\n<ac:structured-macro ac:name="${macroType}"${titleAttr}><ac:rich-text-body><p>${content}</p></ac:rich-text-body></ac:structured-macro>\n`;
-      }
-    );
+    let processedMarkdown = markdown;
 
     // Remove Obsidian embeds ![[...]] as they won't work in Confluence
     processedMarkdown = processedMarkdown.replace(/!\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (match, name) => {
@@ -407,6 +388,30 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
           .replace(/&amp;/g, '&')
           .trim();
         return `<ac:structured-macro ac:name="code"><ac:plain-text-body><![CDATA[${decoded}]]></ac:plain-text-body></ac:structured-macro>`;
+      }
+    );
+
+    // Convert Obsidian callout blockquotes to Confluence macros.
+    // marked turns "> [!tip] Title\n> content" into <blockquote><p>[!tip] Title\ncontent</p></blockquote>
+    // We detect that pattern in HTML-space, avoiding marked re-processing the Confluence XML.
+    const calloutTypeMap: Record<string, string> = {
+      note: 'note', tip: 'tip', info: 'info', important: 'note',
+      warning: 'warning', caution: 'warning', attention: 'warning',
+      danger: 'warning', error: 'warning',
+      success: 'tip', check: 'tip', hint: 'tip',
+      question: 'note', faq: 'note', help: 'note',
+      quote: 'note', abstract: 'note', summary: 'note',
+      todo: 'note', bug: 'warning', example: 'info'
+    };
+    html = html.replace(
+      /<blockquote>\s*<p>\[!(note|tip|warning|info|important|caution|danger|error|success|check|question|quote|abstract|summary|todo|bug|example|faq|help|hint|attention)\]([^\n<]*)(?:\n([\s\S]*?))?<\/p>\s*<\/blockquote>/gi,
+      (match, type, titleRaw, bodyRaw) => {
+        const macroType = calloutTypeMap[type.toLowerCase()] || 'info';
+        const title = titleRaw.trim();
+        const titleAttr = title ? ` ac:title="${title}"` : '';
+        const body = (bodyRaw || '').trim();
+        const bodyHtml = body ? `<p>${body}</p>` : '';
+        return `\n<ac:structured-macro ac:name="${macroType}"${titleAttr}><ac:rich-text-body>${bodyHtml}</ac:rich-text-body></ac:structured-macro>\n`;
       }
     );
 
