@@ -257,6 +257,11 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
         // Regular folder underscore file: find or create parent folder, then update it
         const parentId = await this.ensureParentPath(file.parent);
         if (parentId) {
+          // Register the MOC file path in pageMap pointing to the folder page so Phase 2
+          // can resolve links like [[02 - Functional Modules/_Modules MOC]] by exact match,
+          // instead of relying on the heuristic fallback.
+          const mocKey = `${file.parent.path}/${file.basename}`;
+          this.pageMap[mocKey] = parentId;
           await this.updatePageContent(parentId, body);
           console.log(`[syncFile] ✅ Updated parent page with content from: ${file.path}`);
           return;
