@@ -127,19 +127,23 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       this.pageCache = {};
       this.skipFiles = new Set();
 
-      // Identify underscore-prefixed files (they update parent, not create new pages)
+      // Separate underscore files from normal files
+      const underscoreFiles: TFile[] = [];
+      const normalFiles: TFile[] = [];
       for (const file of files) {
         if (file.basename.startsWith('_')) {
-          this.skipFiles.add(file.path);
+          underscoreFiles.push(file);
           console.log(`[Confluence Sync] Underscore file (updates parent): ${file.path}`);
+        } else {
+          normalFiles.push(file);
         }
       }
 
       let successCount = 0;
       let failureCount = 0;
-      const filesToSync = files.filter(f => !this.processedFiles.has(f.path) && !this.skipFiles.has(f.path));
+      const filesToSync = normalFiles.filter(f => !this.processedFiles.has(f.path));
 
-      // Phase 1: Create/sync all pages and collect IDs
+      // Phase 1: Create/sync all normal pages and folder hierarchy
       new Notice(`📄 Phase 1: Creating ${filesToSync.length} page(s)...`);
       for (let i = 0; i < filesToSync.length; i++) {
         if (!this.isSyncing) {
@@ -170,8 +174,35 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
         }
       }
 
-      // Phase 2: Update links in all pages
-      new Notice('🔗 Phase 2: Updating links...');
+      // Phase 2: Update pages with underscore file content
+      const underscoreFilesToSync = underscoreFiles.filter(f => !this.processedFiles.has(f.path));
+      if (underscoreFilesToSync.length > 0) {
+        new Notice(`📝 Phase 2: Updating ${underscoreFilesToSync.length} parent page(s) with content...`);
+        for (let i = 0; i < underscoreFilesToSync.length; i++) {
+          if (!this.isSyncing) {
+            console.log(`[Confluence Sync] Stopped by user during Phase 2 at file ${i + 1}/${underscoreFilesToSync.length}`);
+            await this.saveSyncState();
+            new Notice(`⏹️ Sync paused. Progress saved.`);
+            return;
+          }
+
+          const file = underscoreFilesToSync[i];
+          const progress = `(${i + 1}/${underscoreFilesToSync.length})`;
+          try {
+            console.log(`[Confluence Sync] Processing underscore file: ${file.path}`);
+            new Notice(`⏳ Phase 2 ${progress}: ${file.basename}...`, 2000);
+            await this.syncFile(file);
+            this.processedFiles.add(file.path);
+            console.log(`[Confluence Sync] ✅ Success: ${file.path}`);
+          } catch (error) {
+            console.error(`[Confluence Sync] ❌ Failed: ${file.path}`, error);
+            new Notice(`❌ Failed to process ${file.basename}: ${error}`, 3000);
+          }
+        }
+      }
+
+      // Phase 3: Update links in all pages
+      new Notice('🔗 Phase 3: Updating links...');
       console.log(`[Confluence Sync] Page map with ${Object.keys(this.pageMap).length} entries`);
       await this.updateAllPageLinks();
 
