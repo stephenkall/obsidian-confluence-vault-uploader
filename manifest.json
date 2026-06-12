@@ -1,7 +1,7 @@
 {
   "id": "confluence-vault-uploader",
   "name": "Confluence Vault Uploader",
-  "version": "0.0.30",
+  "version": "0.0.31",
   "minAppVersion": "1.4.0",
   "description": "Sync your vault to Confluence, preserving folder structure as a page hierarchy with working cross-page links.",
   "author": "stephenkall",
