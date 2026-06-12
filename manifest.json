@@ -1,5 +1,5 @@
 {
-  "id": "obsidian-confluence-vault-uploader",
+  "id": "confluence-vault-uploader",
   "name": "Confluence Vault Uploader",
   "version": "0.0.29",
   "minAppVersion": "1.4.0",
