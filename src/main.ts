@@ -3,7 +3,7 @@ import { marked } from 'marked';
 import { ConfluenceVaultUploaderSettingTab, ConfluenceVaultUploaderSettings, DEFAULT_SETTINGS } from './settings';
 
 interface SyncState {
-  pageMap: Record<string, string>; // title → pageId
+  pageMap: Record<string, string>; // obsidianPath (no ext) → confluencePageId
   pageVersions: Record<string, number>; // pageId → version
   processedFiles: string[]; // Already synced files
   timestamp: number;
@@ -12,7 +12,8 @@ interface SyncState {
 export default class ConfluenceVaultUploaderPlugin extends Plugin {
   settings: ConfluenceVaultUploaderSettings = DEFAULT_SETTINGS;
   private pageCache: Record<string, { id: string; version: number }> = {};
-  private pageMap: Record<string, string> = {}; // title → pageId mapping for link resolution
+  private pageMap: Record<string, string> = {}; // obsidianPath (no ext) → confluencePageId
+  private nameToPath: Record<string, string> = {}; // basename (no ext) → full obsidian path (no ext)
   private pageVersions: Record<string, number> = {}; // pageId → version for updates
   private isSyncing: boolean = false;
   private spaceId: string = '';
@@ -148,6 +149,14 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       // Sort files by path for consistent ordering
       files = files.sort((a, b) => a.path.localeCompare(b.path));
 
+      // Build basename → full-path map so buildMarkdownBody can expand short [[links]] to full paths.
+      // Full path is stored without the .md extension to match what OBSIDIAN_LINK placeholders will use.
+      this.nameToPath = {};
+      for (const f of files) {
+        const fullPath = f.path.replace(/\.md$/, '');
+        this.nameToPath[f.basename] = fullPath;
+      }
+
       console.log(`[Confluence Sync] Starting: ${files.length} total files, ${this.processedFiles.size} already synced`);
       this.pageCache = {};
       let successCount = 0;
@@ -257,11 +266,12 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
         // Regular folder underscore file: find or create parent folder, then update it
         const parentId = await this.ensureParentPath(file.parent);
         if (parentId) {
-          // Register the MOC file path in pageMap pointing to the folder page so Phase 2
-          // can resolve links like [[02 - Functional Modules/_Modules MOC]] by exact match,
-          // instead of relying on the heuristic fallback.
-          const mocKey = `${file.parent.path}/${file.basename}`;
-          this.pageMap[mocKey] = parentId;
+          // Register both the folder path and this MOC file path pointing to the same Confluence page,
+          // so Phase 2 resolves both [[FolderName]] and [[FolderName/_MOC]] by exact match.
+          const folderPath = file.parent.path; // e.g. "02 - Functional Modules"
+          const mocPath = file.path.replace(/\.md$/, ''); // e.g. "02 - Functional Modules/_Modules MOC"
+          this.pageMap[folderPath] = parentId;
+          this.pageMap[mocPath] = parentId;
           await this.updatePageContent(parentId, body);
           console.log(`[syncFile] ✅ Updated parent page with content from: ${file.path}`);
           return;
@@ -276,8 +286,9 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     console.log(`[syncFile] Creating/updating page: ${title} (parent: ${parentId || 'root'})`);
     const pageId = await this.createOrUpdatePage(title, body, parentId);
 
-    // Register page in map for link resolution
-    this.pageMap[title] = pageId;
+    // Register by full obsidian path (no extension) — the key format Phase 2 will look up
+    const fullPath = file.path.replace(/\.md$/, ''); // e.g. "01 - Overview/System Landscape"
+    this.pageMap[fullPath] = pageId;
 
     console.log(`[syncFile] ✅ Completed: ${file.path}`);
   }
@@ -314,6 +325,8 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
         const parentPageId = parentId || this.settings.rootPageId || '';
         const pageId = await this.findOrCreateFolderPage(part, parentPageId);
         this.pageCache[currentPath] = { id: pageId, version: 1 };
+        // Register folder by full vault path so Phase 2 resolves [[FolderName]] links exactly
+        this.pageMap[currentPath] = pageId;
       }
 
       parentId = this.pageCache[currentPath].id;
@@ -355,22 +368,30 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
 
     let processedMarkdown = markdown;
 
-    // Convert Obsidian embeds ![[File]] to links — Phase 2 will resolve them to Confluence URLs
+    // Resolve an Obsidian link name to a full vault path (no extension).
+    // If the link already contains "/" it is already a path; otherwise look up nameToPath.
+    const resolveObsidianPath = (name: string): string => {
+      const clean = name.trim();
+      if (clean.includes('/')) return clean; // already a full path like "02 - Functional Modules/_Modules MOC"
+      return this.nameToPath[clean] ?? clean; // expand "System Landscape" → "01 - Overview/System Landscape"
+    };
+
+    // Convert Obsidian embeds ![[File]] to links — Phase 2 will resolve them to Confluence URLs.
+    // Placeholder uses full vault path so Phase 2 lookup is unambiguous.
     processedMarkdown = processedMarkdown.replace(/!\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (match, name, alt) => {
-      const cleanName = name.trim();
-      const display = (alt || cleanName).trim();
-      return `[${display}](OBSIDIAN_LINK:${cleanName})`;
+      const fullPath = resolveObsidianPath(name);
+      const display = (alt || name).trim();
+      return `[${display}](OBSIDIAN_LINK:${fullPath})`;
     });
 
-    // Convert Obsidian wiki links [[Page Name]] to temporary placeholders
-    // Format: [[Page Name]] or [[Page Name|Display Text]]
+    // Convert Obsidian wiki links [[Page Name]] to temporary placeholders.
+    // Placeholder uses full vault path so Phase 2 lookup is unambiguous.
     processedMarkdown = processedMarkdown.replace(
       /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g,
       (match, pageName, displayText) => {
-        const display = displayText || pageName;
-        const cleanPageName = pageName.trim();
-        // Use a special marker that we'll replace in phase 2
-        return `[${display}](OBSIDIAN_LINK:${cleanPageName})`;
+        const fullPath = resolveObsidianPath(pageName);
+        const display = (displayText || pageName).trim();
+        return `[${display}](OBSIDIAN_LINK:${fullPath})`;
       }
     );
 
@@ -682,31 +703,13 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
         let content = pageData.body.storage.value;
         let hasLinks = false;
 
-        const resolveLink = (pageName: string): string | null => {
-          const cleanName = pageName.trim();
-          const linkedPageId = this.pageMap[cleanName];
-          if (linkedPageId) return linkedPageId;
-
-          // Try by basename only (strip folder prefix)
-          const baseName = cleanName.split('/').pop() || cleanName;
-          const byBase = Object.entries(this.pageMap).find(([k]) => k === baseName || k.endsWith('/' + baseName));
-          if (byBase) return byBase[1];
-
-          // If link targets a _* MOC file within a folder path, resolve to the parent folder page
-          // e.g. "02 - Functional Modules/_Modules MOC" → "02 - Functional Modules"
-          if (cleanName.includes('/')) {
-            const parts = cleanName.split('/');
-            const lastName = parts[parts.length - 1];
-            if (lastName.startsWith('_')) {
-              const parentName = parts[parts.length - 2];
-              const byParent = Object.entries(this.pageMap).find(([k]) =>
-                k === parentName || k.endsWith('/' + parentName)
-              );
-              if (byParent) return byParent[1];
-            }
-          }
-
-          console.warn(`[updateAllPageLinks] Unresolved link: ${cleanName}`);
+        // Exact lookup by full obsidian path — no heuristics needed because placeholders
+        // already carry the full path (set during Phase 1 buildMarkdownBody via nameToPath).
+        const resolveLink = (obsidianPath: string): string | null => {
+          const clean = obsidianPath.trim();
+          const id = this.pageMap[clean];
+          if (id) return id;
+          console.warn(`[updateAllPageLinks] Unresolved link: ${clean}`);
           return null;
         };
 

@@ -1,7 +1,7 @@
 {
   "id": "obsidian-confluence-vault-uploader",
   "name": "Confluence Vault Uploader",
-  "version": "0.0.23",
+  "version": "0.0.24",
   "minAppVersion": "1.4.0",
   "description": "Push an entire Obsidian vault into a custom Confluence parent page using Confluence REST API.",
   "author": "stephenkall",
