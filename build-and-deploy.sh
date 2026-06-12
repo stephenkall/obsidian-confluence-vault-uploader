@@ -1,7 +1,18 @@
 #!/bin/bash
 
-# Setup PATH
+# Setup PATH for Node.js (Git Bash on Windows)
 export PATH="/c/Program Files/nodejs:$PATH"
+
+# Load local vault path from .env (copy .env.example → .env to configure)
+if [ -f .env ]; then
+  # shellcheck disable=SC1091
+  source .env
+fi
+
+if [ -z "$OBSIDIAN_PLUGIN_DIR" ]; then
+  echo "❌ OBSIDIAN_PLUGIN_DIR not set. Copy .env.example → .env and fill in the path."
+  exit 1
+fi
 
 # Get version from package.json
 VERSION=$(grep '"version"' package.json | head -1 | sed 's/.*"version": "\([^"]*\)".*/\1/')
@@ -16,15 +27,12 @@ echo "🏗️  Building plugin..."
 npm run build
 
 # Deploy to Obsidian plugins folder
-PLUGIN_DEST="C:/Users/zhuvi1/Mars Inc/WMS Non-ECC - General/Applications/PDLS/PDLS Application code/PDLS_Vault/.obsidian/plugins/obsidian-confluence-vault-uploader"
+echo "📁 Copying to: $OBSIDIAN_PLUGIN_DIR"
+mkdir -p "$OBSIDIAN_PLUGIN_DIR"
 
-echo "📁 Copying to: $PLUGIN_DEST"
-mkdir -p "$PLUGIN_DEST"
-
-# Copy compiled files
-cp main.js "$PLUGIN_DEST/"
-cp main.js.map "$PLUGIN_DEST/"
-cp manifest.json "$PLUGIN_DEST/"
+cp main.js "$OBSIDIAN_PLUGIN_DIR/"
+cp main.js.map "$OBSIDIAN_PLUGIN_DIR/"
+cp manifest.json "$OBSIDIAN_PLUGIN_DIR/"
 
 echo "✅ Build complete! Version $VERSION deployed."
 echo "🔄 Reload plugin in Obsidian (Settings → Community plugins → Reload or Ctrl+Shift+P → Reload)"

@@ -33,7 +33,7 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl('h2', { text: 'Confluence Vault Uploader Settings' });
+    new Setting(containerEl).setName('Confluence Vault Uploader Settings').setHeading();
 
     new Setting(containerEl)
       .setName('Confluence base URL')
@@ -72,7 +72,7 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
             this.plugin.settings.apiToken = value.trim();
             await this.plugin.saveSettings();
           });
-        (text as any).inputEl.type = 'password';
+        text.inputEl.type = 'password';
         return text;
       });
 

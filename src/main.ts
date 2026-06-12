@@ -1,4 +1,4 @@
-import { App, Notice, Plugin, requestUrl, TFile, TFolder } from 'obsidian';
+import { Notice, Plugin, RequestUrlParam, requestUrl, TFile, TFolder } from 'obsidian';
 import { marked } from 'marked';
 import { ConfluenceVaultUploaderSettingTab, ConfluenceVaultUploaderSettings, DEFAULT_SETTINGS } from './settings';
 
@@ -7,6 +7,34 @@ interface SyncState {
   pageVersions: Record<string, number>; // pageId → version
   processedFiles: string[]; // Already synced files
   timestamp: number;
+}
+
+interface SavedData extends ConfluenceVaultUploaderSettings {
+  syncState?: SyncState;
+}
+
+interface ConfluencePageResponse {
+  id: string;
+  title: string;
+  status: string;
+  version: { number: number };
+  body?: { storage?: { value: string } };
+  ancestors?: Array<{ id: string }>;
+}
+
+interface ConfluenceSearchResponse {
+  results: ConfluencePageResponse[];
+  size: number;
+}
+
+interface ConfluenceSpacesResponse {
+  results: Array<{ id: string; key: string; name: string }>;
+}
+
+interface RequestError {
+  status?: number;
+  message?: string;
+  body?: string;
 }
 
 export default class ConfluenceVaultUploaderPlugin extends Plugin {
@@ -119,12 +147,12 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
         for (const [title, pageId] of Object.entries(this.pageMap)) {
           try {
             const url = `${this.getConfluenceBaseUrl()}/api/v2/pages/${pageId}`;
-            const response = await this.requestConfluence(url, 'GET');
+            const response = await this.requestConfluence<ConfluencePageResponse>(url, 'GET');
             if (response && response.id) {
               validPageMap[title] = pageId;
               console.log(`[Confluence Sync] ✓ Page still exists: ${title}`);
             }
-          } catch (error) {
+          } catch {
             console.warn(`[Confluence Sync] ✗ Page deleted or inaccessible: ${title} (${pageId})`);
             this.processedFiles.delete(title); // Re-sync this file
           }
@@ -192,11 +220,12 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
           if (successCount % 10 === 0) {
             await this.saveSyncState();
           }
-        } catch (error: any) {
-          const status = error?.status ?? error?.response?.status ?? '';
-          const detail = error?.message ?? String(error);
+        } catch (rawError) {
+          const error = rawError as RequestError;
+          const status = error.status ?? '';
+          const detail = rawError instanceof Error ? rawError.message : String(rawError);
           // Obsidian's RequestUrlError carries the response body in .body (not .message)
-          const responseBody = error?.body ?? '';
+          const responseBody = error.body ?? '';
           console.error(`[Confluence Sync] ❌ Failed: ${file.path} | status=${status} | ${detail}`);
           if (responseBody) console.error(`[Confluence Sync] ❌ Response body:`, responseBody.substring(0, 2000));
           failureCount += 1;
@@ -220,7 +249,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
 
       await this.saveSyncState();
 
-      const message = `✅ Confluence sync complete: ${successCount} new, ${this.pageMap ? Object.keys(this.pageMap).length : 0} total pages.`;
+      const message = `✅ Confluence sync complete: ${successCount} succeeded, ${failureCount} failed, ${Object.keys(this.pageMap).length} total pages.`;
       new Notice(message, 5000);
       console.log(`[Confluence Sync] ${message}`);
     } finally {
@@ -232,7 +261,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     const baseUrl = this.getConfluenceBaseUrl();
     const url = `${baseUrl}/api/v2/spaces?keys=${this.settings.spaceKey}&limit=1`;
 
-    const response = await this.requestConfluence(url, 'GET');
+    const response = await this.requestConfluence<ConfluenceSpacesResponse>(url, 'GET');
     if (response?.results && response.results.length > 0) {
       return response.results[0].id;
     }
@@ -359,7 +388,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
 
     console.log(`[findOrCreateFolderPage] Creating new folder: ${folderName}`);
     const url = `${this.getConfluenceBaseUrl()}/api/v2/pages`;
-    const payload: any = {
+    const payload: Record<string, unknown> = {
       spaceId: this.spaceId,
       status: 'current',
       title: folderName,
@@ -367,7 +396,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     };
     if (parentPageId) payload.parentId = parentPageId;
 
-    const response = await this.requestConfluence(url, 'POST', payload);
+    const response = await this.requestConfluence<ConfluencePageResponse>(url, 'POST', payload);
     console.log(`[findOrCreateFolderPage] Created folder: ${folderName} (id: ${response.id})`);
     // Register folder page so Phase 2 can resolve its links
     this.pageMap[folderName] = response.id;
@@ -396,8 +425,8 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     // Convert Obsidian embeds ![[File]] to links — Phase 2 will resolve them to Confluence URLs.
     // Placeholder uses full vault path so Phase 2 lookup is unambiguous.
     processedMarkdown = processedMarkdown.replace(/!\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (match, name, alt) => {
-      const fullPath = resolveObsidianPath(name);
-      const display = (alt || name).trim();
+      const fullPath = resolveObsidianPath(name as string);
+      const display = ((alt as string | undefined) || (name as string)).trim();
       return `[${display}](OBSIDIAN_LINK:${fullPath})`;
     });
 
@@ -417,8 +446,8 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     processedMarkdown = processedMarkdown.replace(
       /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g,
       (match, pageName, displayText) => {
-        const fullPath = resolveObsidianPath(pageName);
-        const display = linkDisplay(pageName, displayText);
+        const fullPath = resolveObsidianPath(pageName as string);
+        const display = linkDisplay(pageName as string, displayText as string | undefined);
         return `[${display}](OBSIDIAN_LINK:${fullPath})`;
       }
     );
@@ -429,14 +458,14 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     html = html.replace(
       /<pre><code class="language-(\w+)">([\s\S]*?)<\/code><\/pre>/g,
       (match, language, code) => {
-        const decoded = code
+        const decoded = (code as string)
           .replace(/&lt;/g, '<')
           .replace(/&gt;/g, '>')
           .replace(/&amp;/g, '&')
           .trim();
         // Escape ]]> so it doesn't terminate the CDATA section prematurely
         const safe = decoded.replace(/\]\]>/g, ']]]]><![CDATA[>');
-        return `<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">${language}</ac:parameter><ac:plain-text-body><![CDATA[${safe}]]></ac:plain-text-body></ac:structured-macro>`;
+        return `<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">${language as string}</ac:parameter><ac:plain-text-body><![CDATA[${safe}]]></ac:plain-text-body></ac:structured-macro>`;
       }
     );
 
@@ -444,7 +473,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     html = html.replace(
       /<pre><code>([\s\S]*?)<\/code><\/pre>/g,
       (match, code) => {
-        const decoded = code
+        const decoded = (code as string)
           .replace(/&lt;/g, '<')
           .replace(/&gt;/g, '>')
           .replace(/&amp;/g, '&')
@@ -469,10 +498,10 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     html = html.replace(
       /<blockquote>\s*<p>\[!(note|tip|warning|info|important|caution|danger|error|success|check|question|quote|abstract|summary|todo|bug|example|faq|help|hint|attention)\]([^\n<]*)(?:\n([\s\S]*?))?<\/p>\s*<\/blockquote>/gi,
       (match, type, titleRaw, bodyRaw) => {
-        const macroType = calloutTypeMap[type.toLowerCase()] || 'info';
-        const title = titleRaw.trim();
+        const macroType = calloutTypeMap[(type as string).toLowerCase()] || 'info';
+        const title = (titleRaw as string).trim();
         const titleAttr = title ? ` ac:title="${title}"` : '';
-        const body = (bodyRaw || '').trim();
+        const body = ((bodyRaw as string | undefined) || '').trim();
         const bodyHtml = body ? `<p>${body}</p>` : '';
         return `\n<ac:structured-macro ac:name="${macroType}"${titleAttr}><ac:rich-text-body>${bodyHtml}</ac:rich-text-body></ac:structured-macro>\n`;
       }
@@ -506,13 +535,13 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
   async findPageByTitle(title: string, parentPageId?: string): Promise<{ id: string; version: number } | null> {
     const url = `${this.getConfluenceBaseUrl()}/rest/api/content?title=${encodeURIComponent(title)}&spaceKey=${encodeURIComponent(this.settings.spaceKey)}&expand=version`;
 
-    const response = await this.requestConfluence(url, 'GET');
+    const response = await this.requestConfluence<ConfluenceSearchResponse>(url, 'GET');
     if (response && response.results && response.results.length > 0) {
       let targetPage = response.results[0];
 
       if (parentPageId && response.results.length > 1) {
-        const childPage = response.results.find((p: any) =>
-          p.ancestors?.some((a: any) => a.id === parentPageId)
+        const childPage = response.results.find(p =>
+          p.ancestors?.some(a => a.id === parentPageId)
         );
         if (childPage) {
           targetPage = childPage;
@@ -531,7 +560,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
   async createPage(title: string, body: { value: string; representation: string }, parentPageId: string): Promise<string> {
     const url = `${this.getConfluenceBaseUrl()}/api/v2/pages`;
 
-    const payload: any = {
+    const payload: Record<string, unknown> = {
       spaceId: this.spaceId,
       status: 'current',
       title,
@@ -544,11 +573,11 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
 
     console.log(`[createPage] POST to ${url}`);
     console.log(`[createPage] Payload: title="${title}", representation="${body.representation}", bodyLength=${body.value.length}`);
-    const response = await this.requestConfluence(url, 'POST', payload);
+    const response = await this.requestConfluence<ConfluencePageResponse>(url, 'POST', payload);
     console.log(`[createPage] ✅ Created page ID: ${response.id}`);
 
     // Track version for future updates
-    this.pageVersions[response.id] = response.version?.number || 1;
+    this.pageVersions[response.id] = response.version.number;
 
     return response.id;
   }
@@ -556,7 +585,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
   async updatePage(pageId: string, currentVersion: number, title: string, body: { value: string; representation: string }, parentPageId: string) {
     const url = `${this.getConfluenceBaseUrl()}/api/v2/pages/${pageId}`;
 
-    const payload: any = {
+    const payload: Record<string, unknown> = {
       id: pageId,
       status: 'current',
       title,
@@ -572,16 +601,16 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
 
     console.log(`[updatePage] PUT to ${url}`);
     console.log(`[updatePage] Payload: title="${title}", version=${currentVersion + 1}, bodyLength=${body.value.length}`);
-    await this.requestConfluence(url, 'PUT', payload);
+    await this.requestConfluence<ConfluencePageResponse>(url, 'PUT', payload);
     console.log(`[updatePage] ✅ Updated page ID: ${pageId}`);
   }
 
   private async updatePageContent(pageId: string, body: { value: string; representation: string }) {
     try {
       const url = `${this.getConfluenceBaseUrl()}/api/v2/pages/${pageId}`;
-      const pageData = await this.requestConfluence(url, 'GET');
+      const pageData = await this.requestConfluence<ConfluencePageResponse>(url, 'GET');
 
-      const payload = {
+      const payload: Record<string, unknown> = {
         id: pageId,
         status: 'current',
         title: pageData.title,
@@ -591,7 +620,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
         }
       };
 
-      await this.requestConfluence(url, 'PUT', payload);
+      await this.requestConfluence<ConfluencePageResponse>(url, 'PUT', payload);
       console.log(`[updatePageContent] ✅ Updated content for page ${pageId}`);
     } catch (error) {
       console.error(`[updatePageContent] ❌ Failed to update page ${pageId}:`, error);
@@ -599,13 +628,13 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     }
   }
 
-  async requestConfluence(url: string, method: string, body?: any): Promise<any> {
+  async requestConfluence<T>(url: string, method: string, body?: unknown): Promise<T> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       Authorization: `Basic ${btoa(`${this.settings.username}:${this.settings.apiToken}`)}`
     };
 
-    const requestOptions: any = {
+    const requestOptions: RequestUrlParam = {
       url,
       method,
       headers
@@ -621,7 +650,6 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
 
     if (response.status < 200 || response.status >= 300) {
       console.error(`[requestConfluence] ERROR ${response.status}`);
-      console.error(`[requestConfluence] statusText:`, (response as any).statusText);
       console.error(`[requestConfluence] text length:`, response.text?.length);
       if (response.text) {
         console.error(`[requestConfluence] text:`, response.text.substring(0, 1000));
@@ -644,7 +672,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       console.error(`[requestConfluence] Final error message:`, errorMsg);
       throw new Error(`Confluence request failed (${response.status}): ${errorMsg}`);
     }
-    return response.json;
+    return response.json as T;
   }
 
   private getConfluenceBaseUrl(): string {
@@ -684,11 +712,11 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
   }
 
   private async loadSyncState(): Promise<SyncState | null> {
-    const data = await this.loadData();
+    const data = (await this.loadData()) as SavedData | null;
     if (data?.syncState) {
-      this.pageMap = data.syncState.pageMap || {};
-      this.pageVersions = data.syncState.pageVersions || {};
-      this.processedFiles = new Set(data.syncState.processedFiles || []);
+      this.pageMap = data.syncState.pageMap ?? {};
+      this.pageVersions = data.syncState.pageVersions ?? {};
+      this.processedFiles = new Set(data.syncState.processedFiles ?? []);
       console.log(`[Sync State] Loaded state with ${Object.keys(this.pageMap).length} pages, ${this.processedFiles.size} processed files`);
       return data.syncState;
     }
@@ -717,7 +745,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       try {
         // Fetch current page content — must request body-format=storage explicitly
         const url = `${this.getConfluenceBaseUrl()}/api/v2/pages/${pageId}?body-format=storage`;
-        const pageData = await this.requestConfluence(url, 'GET');
+        const pageData = await this.requestConfluence<ConfluencePageResponse>(url, 'GET');
 
         // Check stop again after async GET (more responsive)
         if (!this.isSyncing) {
@@ -780,7 +808,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
 
         // If links were updated, save the page
         if (hasLinks) {
-          const updatePayload = {
+          const updatePayload: Record<string, unknown> = {
             id: pageId,
             status: 'current',
             title: pageData.title, // use actual Confluence title, not the pageMap key (which is the vault path)
@@ -794,7 +822,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
           };
 
           const updateUrl = `${this.getConfluenceBaseUrl()}/api/v2/pages/${pageId}`;
-          await this.requestConfluence(updateUrl, 'PUT', updatePayload);
+          await this.requestConfluence<ConfluencePageResponse>(updateUrl, 'PUT', updatePayload);
           updated++;
           console.log(`[updateAllPageLinks] ✅ Updated links in: ${title}`);
         }
