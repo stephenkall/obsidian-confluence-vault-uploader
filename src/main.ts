@@ -185,10 +185,12 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
           if (successCount % 10 === 0) {
             await this.saveSyncState();
           }
-        } catch (error) {
-          console.error(`[Confluence Sync] ❌ Failed: ${file.path}`, error);
+        } catch (error: any) {
+          const detail = error?.message ?? String(error);
+          const status = error?.status ?? error?.response?.status ?? '';
+          console.error(`[Confluence Sync] ❌ Failed: ${file.path} | status=${status} | ${detail}`, error);
           failureCount += 1;
-          new Notice(`❌ Failed to sync ${file.basename}: ${error}`, 3000);
+          new Notice(`❌ Failed to sync ${file.basename}: ${detail}`, 5000);
         }
       }
 
@@ -290,7 +292,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     const fullPath = file.path.replace(/\.md$/, ''); // e.g. "01 - Overview/System Landscape"
     this.pageMap[fullPath] = pageId;
 
-    console.log(`[syncFile] ✅ Completed: ${file.path}`);
+    console.log(`[syncFile] ✅ Completed: ${file.path} → Confluence page ${pageId} (parent: ${parentId || 'root'})`);
   }
 
   private removeFrontmatter(markdown: string): string {
@@ -384,13 +386,24 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       return `[${display}](OBSIDIAN_LINK:${fullPath})`;
     });
 
+    // Derive a human-readable display label for a link target.
+    // If the target is a _MOC file with no explicit display text, use the parent folder name.
+    // e.g. "02 - Functional Modules/_Modules MOC" → "02 - Functional Modules"
+    const linkDisplay = (pageName: string, displayText: string | undefined): string => {
+      if (displayText) return displayText.trim();
+      const parts = pageName.split('/');
+      const last = parts[parts.length - 1].trim();
+      if (last.startsWith('_') && parts.length > 1) return parts[parts.length - 2].trim();
+      return pageName.trim();
+    };
+
     // Convert Obsidian wiki links [[Page Name]] to temporary placeholders.
     // Placeholder uses full vault path so Phase 2 lookup is unambiguous.
     processedMarkdown = processedMarkdown.replace(
       /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g,
       (match, pageName, displayText) => {
         const fullPath = resolveObsidianPath(pageName);
-        const display = (displayText || pageName).trim();
+        const display = linkDisplay(pageName, displayText);
         return `[${display}](OBSIDIAN_LINK:${fullPath})`;
       }
     );
