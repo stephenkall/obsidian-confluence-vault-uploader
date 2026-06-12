@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Obsidian Plugin Debug",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/node_modules/.bin/rollup",
+      "args": ["-c", "-w"],
+      "console": "integratedTerminal",
+      "outFiles": ["${workspaceFolder}/main.js"]
+    }
+  ]
+}

@@ -51,9 +51,11 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     }
   }
 
-  private clearCache() {
+  private async clearCache() {
     this.clearSyncState();
     this.pageCache = {};
+    // Persist the cleared state so next run starts fresh
+    await this.saveData({ ...this.settings, syncState: null });
     new Notice('✅ Confluence sync cache cleared. Next sync will start fresh.');
     console.log('[clearCache] Cleared all sync state and page cache');
   }
@@ -600,19 +602,37 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
         let content = pageData.body.storage.value;
         let hasLinks = false;
 
-        // Replace all OBSIDIAN_LINK: placeholders with actual Confluence page links
-        content = content.replace(/href="OBSIDIAN_LINK:([^"]+)"/g, (match: string, pageName: string) => {
-          const linkedPageId = this.pageMap[pageName];
-          if (linkedPageId) {
-            hasLinks = true;
-            const baseUrl = this.getConfluenceBaseUrl().replace(/\/wiki$/, '');
-            const spaceKey = this.settings.spaceKey;
-            const pageUrl = `${baseUrl}/wiki/spaces/${spaceKey}/pages/${linkedPageId}/${pageName.replace(/\s+/g, '+')}`;
-            console.log(`[updateAllPageLinks] Resolved link: ${pageName} → ${linkedPageId}`);
-            return `href="${pageUrl}"`;
+        const resolveLink = (pageName: string): string | null => {
+          const cleanName = pageName.trim();
+          const linkedPageId = this.pageMap[cleanName];
+          if (!linkedPageId) {
+            // Try to find by basename only (strip folder prefix)
+            const baseName = cleanName.split('/').pop() || cleanName;
+            const byBase = Object.entries(this.pageMap).find(([k]) => k === baseName || k.endsWith('/' + baseName));
+            if (byBase) return byBase[1];
+            console.warn(`[updateAllPageLinks] Unresolved link: ${cleanName}`);
+            return null;
           }
-          // Leave unresolved links as-is
-          console.warn(`[updateAllPageLinks] Unresolved link: ${pageName}`);
+          return linkedPageId;
+        };
+
+        const buildUrl = (pageId: string, pageName: string): string => {
+          const baseUrl = this.getConfluenceBaseUrl().replace(/\/wiki$/, '');
+          const spaceKey = this.settings.spaceKey;
+          return `${baseUrl}/wiki/spaces/${spaceKey}/pages/${pageId}/${pageName.trim().replace(/\s+/g, '+')}`;
+        };
+
+        // Replace <a href="OBSIDIAN_LINK:pageName"> (marked parsed single-word links into real <a> tags)
+        content = content.replace(/href="OBSIDIAN_LINK:([^"]+)"/g, (match: string, pageName: string) => {
+          const pageId = resolveLink(pageName);
+          if (pageId) { hasLinks = true; return `href="${buildUrl(pageId, pageName)}"`; }
+          return match;
+        });
+
+        // Replace [text](OBSIDIAN_LINK:pageName) (multi-word links marked left as plain text)
+        content = content.replace(/\[([^\]]+)\]\(OBSIDIAN_LINK:([^)]+)\)/g, (match: string, text: string, pageName: string) => {
+          const pageId = resolveLink(pageName);
+          if (pageId) { hasLinks = true; return `<a href="${buildUrl(pageId, pageName)}">${text}</a>`; }
           return match;
         });
 

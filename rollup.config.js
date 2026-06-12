@@ -1,17 +1,26 @@
-import resolve from '@rollup/plugin-node-resolve';
-import commonjs from '@rollup/plugin-commonjs';
-import typescript from 'rollup-plugin-typescript2';
+const resolve = require('@rollup/plugin-node-resolve');
+const commonjs = require('@rollup/plugin-commonjs');
+const typescript = require('@rollup/plugin-typescript');
 
-export default {
+module.exports = {
   input: 'src/main.ts',
   output: {
     file: 'main.js',
     format: 'cjs',
-    sourcemap: true
+    sourcemap: true,
+    exports: 'default'
   },
+  external: ['obsidian'],
   plugins: [
-    resolve(),
-    commonjs(),
-    typescript({ tsconfig: 'tsconfig.json' })
+    typescript({
+      tsconfig: './tsconfig.json'
+    }),
+    resolve({
+      preferBuiltins: false,
+      browser: true
+    }),
+    commonjs({
+      include: 'node_modules/**'
+    })
   ]
 };

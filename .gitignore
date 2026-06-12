@@ -1,4 +1,26 @@
 node_modules
 dist
 main.js
+main.js.map
 *.log
+.env
+.env.local
+.cache/
+.DS_Store
+# Dev/build scripts (local only)
+build.bat
+build-final.bat
+clean-build.bat
+build-log.txt
+update-plugin.bat
+update-plugin.ps1
+# Dev docs (local only)
+BUILD_AND_TEST.md
+DEBUG.md
+DIAGNOSE_ERROR.md
+IMPLEMENTATION.md
+INSTALLATION.md
+NEXT_STEPS.md
+STATUS.md
+SUMMARY.md
+WORKFLOW.md

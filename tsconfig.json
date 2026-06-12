@@ -1,15 +1,21 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
+    "target": "ES6",
     "module": "ESNext",
-    "lib": ["ES2020", "DOM"],
+    "lib": ["DOM", "ES5", "ES6", "ES7"],
+    "allowJs": true,
+    "outDir": "./dist/",
+    "rootDir": "./src/",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
     "strict": true,
     "esModuleInterop": true,
-    "moduleResolution": "Node",
-    "sourceMap": true,
-    "outDir": "./dist",
-    "rootDir": "./src",
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noImplicitAny": true,
+    "resolveJsonModule": true,
+    "moduleResolution": "bundler"
   },
-  "include": ["src"]
+  "include": ["src/**/*.ts"]
 }
