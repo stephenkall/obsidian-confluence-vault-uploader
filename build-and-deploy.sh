@@ -16,7 +16,7 @@ echo "🏗️  Building plugin..."
 npm run build
 
 # Deploy to Obsidian plugins folder
-PLUGIN_DEST="C:/Users/zhuvi1/OneDrive - Mars Inc/Desktop/pdls/PDLS_Vault/.obsidian/plugins/obsidian-confluence-vault-uploader"
+PLUGIN_DEST="C:/Users/zhuvi1/Mars Inc/WMS Non-ECC - General/Applications/PDLS/PDLS Application code/PDLS_Vault/.obsidian/plugins/obsidian-confluence-vault-uploader"
 
 echo "📁 Copying to: $PLUGIN_DEST"
 mkdir -p "$PLUGIN_DEST"

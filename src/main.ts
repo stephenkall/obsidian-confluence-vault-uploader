@@ -149,12 +149,19 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       // Sort files by path for consistent ordering
       files = files.sort((a, b) => a.path.localeCompare(b.path));
 
-      // Build basename → full-path map so buildMarkdownBody can expand short [[links]] to full paths.
-      // Full path is stored without the .md extension to match what OBSIDIAN_LINK placeholders will use.
+      // Build suffix → full-path map so buildMarkdownBody can expand any [[link]] to its full vault path.
+      // We index every suffix of each file path, so both "System Landscape" and
+      // "Book-In/Book-In Overview" (relative within a subfolder) resolve to the correct full path.
       this.nameToPath = {};
       for (const f of files) {
         const fullPath = f.path.replace(/\.md$/, '');
-        this.nameToPath[f.basename] = fullPath;
+        const parts = fullPath.split('/');
+        for (let i = parts.length - 1; i >= 0; i--) {
+          const suffix = parts.slice(i).join('/');
+          if (!this.nameToPath[suffix]) {
+            this.nameToPath[suffix] = fullPath;
+          }
+        }
       }
 
       console.log(`[Confluence Sync] Starting: ${files.length} total files, ${this.processedFiles.size} already synced`);
@@ -186,9 +193,12 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
             await this.saveSyncState();
           }
         } catch (error: any) {
-          const detail = error?.message ?? String(error);
           const status = error?.status ?? error?.response?.status ?? '';
-          console.error(`[Confluence Sync] ❌ Failed: ${file.path} | status=${status} | ${detail}`, error);
+          const detail = error?.message ?? String(error);
+          // Obsidian's RequestUrlError carries the response body in .body (not .message)
+          const responseBody = error?.body ?? '';
+          console.error(`[Confluence Sync] ❌ Failed: ${file.path} | status=${status} | ${detail}`);
+          if (responseBody) console.error(`[Confluence Sync] ❌ Response body:`, responseBody.substring(0, 2000));
           failureCount += 1;
           new Notice(`❌ Failed to sync ${file.basename}: ${detail}`, 5000);
         }
@@ -370,12 +380,17 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
 
     let processedMarkdown = markdown;
 
-    // Resolve an Obsidian link name to a full vault path (no extension).
-    // If the link already contains "/" it is already a path; otherwise look up nameToPath.
+    // Convert task list checkboxes before marked so it never generates <input> elements,
+    // which are invalid in Confluence storage format XML and cause HTTP 400.
+    processedMarkdown = processedMarkdown.replace(/^(\s*[-*+])\s+\[ \]\s+/gm, '$1 ☐ ');
+    processedMarkdown = processedMarkdown.replace(/^(\s*[-*+])\s+\[[xX]\]\s+/gm, '$1 ☑ ');
+
+    // Resolve any Obsidian link (bare name or partial path) to the full vault path.
+    // nameToPath contains every suffix of every file path, so both "System Landscape" and
+    // "Book-In/Book-In Overview" resolve to their full vault paths.
     const resolveObsidianPath = (name: string): string => {
       const clean = name.trim();
-      if (clean.includes('/')) return clean; // already a full path like "02 - Functional Modules/_Modules MOC"
-      return this.nameToPath[clean] ?? clean; // expand "System Landscape" → "01 - Overview/System Landscape"
+      return this.nameToPath[clean] ?? clean;
     };
 
     // Convert Obsidian embeds ![[File]] to links — Phase 2 will resolve them to Confluence URLs.
