@@ -33,8 +33,6 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    new Setting(containerEl).setName('Confluence Vault Uploader Settings').setHeading();
-
     new Setting(containerEl)
       .setName('Confluence base URL')
       .setDesc('Example: https://example.atlassian.net/wiki')
@@ -76,6 +74,8 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
         return text;
       });
 
+    let confirmEl: HTMLElement | undefined;
+
     new Setting(containerEl)
       .setName('Root page URL (Optional)')
       .setDesc('Paste the full page URL to sync from a specific page. Leave empty to sync from space root. The space key will be extracted from the URL.')
@@ -90,27 +90,29 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
               if (pageId && spaceKey) {
                 this.plugin.settings.rootPageId = pageId;
                 this.plugin.settings.spaceKey = spaceKey;
+                confirmEl?.setText(`✅ Extracted: Space=${spaceKey}, PageID=${pageId}`);
                 new Notice(`✅ Extracted: Space=${spaceKey}, PageID=${pageId}`);
               } else {
                 this.plugin.settings.rootPageId = '';
                 this.plugin.settings.spaceKey = '';
+                confirmEl?.setText('❌ Could not extract page ID and space key from URL');
                 new Notice('❌ Could not extract page ID and space key from URL');
               }
             } else {
               this.plugin.settings.rootPageId = '';
               this.plugin.settings.spaceKey = '';
+              confirmEl?.setText('');
             }
             await this.plugin.saveSettings();
-            this.display();
           })
       );
 
-    if (this.plugin.settings.rootPageId) {
-      containerEl.createEl('p', {
-        text: `✅ Selected: Space=${this.plugin.settings.spaceKey}, PageID=${this.plugin.settings.rootPageId}`,
-        cls: 'setting-item-description'
-      });
-    }
+    confirmEl = containerEl.createEl('p', {
+      text: this.plugin.settings.rootPageId
+        ? `✅ Selected: Space=${this.plugin.settings.spaceKey}, PageID=${this.plugin.settings.rootPageId}`
+        : '',
+      cls: 'setting-item-description'
+    });
 
     new Setting(containerEl)
       .setName('Test Connection')
@@ -175,7 +177,7 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
         });
 
         if (pageResponse.status >= 200 && pageResponse.status < 300) {
-          const pageData = pageResponse.json;
+          const pageData = pageResponse.json as { title: string };
           new Notice(`✅ Connection successful! Page found: ${pageData.title}`);
         } else {
           new Notice(`❌ Could not access page (${pageResponse.status}). Please check the URL.`);
