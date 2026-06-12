@@ -322,6 +322,8 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     const existing = await this.findPageByTitle(folderName, parentPageId);
     if (existing) {
       console.log(`[findOrCreateFolderPage] Found existing folder: ${folderName} (id: ${existing.id})`);
+      // Register folder page so Phase 2 can resolve its links
+      this.pageMap[folderName] = existing.id;
       return existing.id;
     }
 
@@ -337,6 +339,8 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
 
     const response = await this.requestConfluence(url, 'POST', payload);
     console.log(`[findOrCreateFolderPage] Created folder: ${folderName} (id: ${response.id})`);
+    // Register folder page so Phase 2 can resolve its links
+    this.pageMap[folderName] = response.id;
     return response.id;
   }
 
@@ -674,34 +678,62 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
         const resolveLink = (pageName: string): string | null => {
           const cleanName = pageName.trim();
           const linkedPageId = this.pageMap[cleanName];
-          if (!linkedPageId) {
-            // Try to find by basename only (strip folder prefix)
-            const baseName = cleanName.split('/').pop() || cleanName;
-            const byBase = Object.entries(this.pageMap).find(([k]) => k === baseName || k.endsWith('/' + baseName));
-            if (byBase) return byBase[1];
-            console.warn(`[updateAllPageLinks] Unresolved link: ${cleanName}`);
-            return null;
+          if (linkedPageId) return linkedPageId;
+
+          // Try by basename only (strip folder prefix)
+          const baseName = cleanName.split('/').pop() || cleanName;
+          const byBase = Object.entries(this.pageMap).find(([k]) => k === baseName || k.endsWith('/' + baseName));
+          if (byBase) return byBase[1];
+
+          // If link targets a _* MOC file within a folder path, resolve to the parent folder page
+          // e.g. "02 - Functional Modules/_Modules MOC" → "02 - Functional Modules"
+          if (cleanName.includes('/')) {
+            const parts = cleanName.split('/');
+            const lastName = parts[parts.length - 1];
+            if (lastName.startsWith('_')) {
+              const parentName = parts[parts.length - 2];
+              const byParent = Object.entries(this.pageMap).find(([k]) =>
+                k === parentName || k.endsWith('/' + parentName)
+              );
+              if (byParent) return byParent[1];
+            }
           }
-          return linkedPageId;
+
+          console.warn(`[updateAllPageLinks] Unresolved link: ${cleanName}`);
+          return null;
         };
 
-        const buildUrl = (pageId: string, pageName: string): string => {
+        // Build Confluence URL using page ID only — title slug is optional and caused wrong URLs
+        // when pageName included a folder path like "08 - Reference/System Messages"
+        const buildUrl = (resolvedPageId: string): string => {
           const baseUrl = this.getConfluenceBaseUrl().replace(/\/wiki$/, '');
-          const spaceKey = this.settings.spaceKey;
-          return `${baseUrl}/wiki/spaces/${spaceKey}/pages/${pageId}/${pageName.trim().replace(/\s+/g, '+')}`;
+          return `${baseUrl}/wiki/spaces/${this.settings.spaceKey}/pages/${resolvedPageId}`;
         };
+
+        // Fix previously-generated wrong URLs that included folder path in slug
+        // Pattern: /pages/{id}/{segment1}/{segment2} — invalid, fix to /pages/{id}
+        const confBase = this.getConfluenceBaseUrl().replace(/\/wiki$/, '');
+        const escapedBase = confBase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const wrongUrlRe = new RegExp(
+          `href="${escapedBase}/wiki/spaces/${this.settings.spaceKey}/pages/(\\d+)/[^"/?]+/[^"/?]+"`,
+          'g'
+        );
+        content = content.replace(wrongUrlRe, (match: string, pid: string) => {
+          hasLinks = true;
+          return `href="${buildUrl(pid)}"`;
+        });
 
         // Replace <a href="OBSIDIAN_LINK:pageName"> (marked parsed single-word links into real <a> tags)
         content = content.replace(/href="OBSIDIAN_LINK:([^"]+)"/g, (match: string, pageName: string) => {
-          const pageId = resolveLink(pageName);
-          if (pageId) { hasLinks = true; return `href="${buildUrl(pageId, pageName)}"`; }
+          const pid = resolveLink(pageName);
+          if (pid) { hasLinks = true; return `href="${buildUrl(pid)}"`; }
           return match;
         });
 
         // Replace [text](OBSIDIAN_LINK:pageName) (multi-word links marked left as plain text)
         content = content.replace(/\[([^\]]+)\]\(OBSIDIAN_LINK:([^)]+)\)/g, (match: string, text: string, pageName: string) => {
-          const pageId = resolveLink(pageName);
-          if (pageId) { hasLinks = true; return `<a href="${buildUrl(pageId, pageName)}">${text}</a>`; }
+          const pid = resolveLink(pageName);
+          if (pid) { hasLinks = true; return `<a href="${buildUrl(pid)}">${text}</a>`; }
           return match;
         });
 
