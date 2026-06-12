@@ -1,81 +1,90 @@
 # Obsidian Confluence Vault Uploader
 
-Sync your entire Obsidian vault to Confluence while maintaining the folder structure. Each folder becomes a parent page, and files become child pages organized hierarchically.
+Sync your entire Obsidian vault to Confluence, preserving the folder structure as a page hierarchy. Obsidian wiki links become real Confluence page links, callout blocks become Confluence macros, and code blocks get syntax highlighting.
 
 ## Features
-- **Hierarchical Sync**: Maintains Obsidian folder structure in Confluence
-- **Smart Browsing**: Built-in page browser to select sync root from Confluence
-- **URL Parser**: Paste Confluence URLs directly to set root page
-- **Automatic Updates**: Updates existing pages without losing version history
-- **Markdown Support**: Converts markdown to HTML using `marked`
-- **Folder as Pages**: Folders are created as Confluence pages (can have child pages)
 
-## Setup
+- **Full vault sync** — every `.md` file becomes a Confluence page nested under the correct parent
+- **Folder pages** — each folder is a Confluence page; files starting with `_` (MOC files) supply its content
+- **Wiki link resolution** — `[[Page]]`, `[[Folder/Page]]`, `[[Page|Display Text]]`, and `![[Embed]]` all become working Confluence links
+- **Callout conversion** — Obsidian `> [!note]`, `> [!warning]`, `> [!tip]`, `> [!danger]` etc. become Confluence info/warning/tip panels
+- **Code block macros** — fenced code blocks with a language tag become Confluence code macros with syntax highlighting
+- **Two-phase sync** — Phase 1 creates all pages; Phase 2 wires up every cross-page link so nothing is left broken
+- **Incremental updates** — re-running only updates changed pages, preserving Confluence version history
 
-### Prerequisites
-- Node.js 18+ installed
-- Npm or yarn
+## Installation
 
-### Installation Steps
-1. Clone or extract the plugin repository
-2. Open the folder in VS Code
-3. Run `npm install`
-4. Run `npm run build`
-5. Copy `manifest.json` and `main.js` to your Obsidian plugins folder:
-   - Windows: `%APPDATA%\Obsidian\plugins\obsidian-confluence-vault-uploader\`
-   - macOS: `~/Library/Application Support/Obsidian/plugins/obsidian-confluence-vault-uploader/`
-   - Linux: `~/.obsidian/plugins/obsidian-confluence-vault-uploader/`
-6. Reload plugins in Obsidian
+> **Not yet in the Obsidian community plugin list.** Install manually for now.
+
+1. Download `main.js` and `manifest.json` from the [latest release](https://github.com/stephenkall/obsidian-confluence-vault-uploader/releases)
+2. Create the folder `<your-vault>/.obsidian/plugins/obsidian-confluence-vault-uploader/`
+3. Copy both files into that folder
+4. In Obsidian: **Settings → Community plugins → reload**, then enable **Confluence Vault Uploader**
+
+**To build from source:**
+```bash
+git clone https://github.com/stephenkall/obsidian-confluence-vault-uploader.git
+cd obsidian-confluence-vault-uploader
+npm install
+npm run build
+# copy main.js + manifest.json to your vault's plugin folder
+```
 
 ## Configuration
 
-1. Open **Settings → Confluence Vault Uploader**
-2. Fill in your Confluence credentials:
-   - **Confluence Base URL**: e.g., `https://example.atlassian.net/wiki`
-   - **Username**: Your Confluence account email
-   - **API Token**: [Generate from Confluence](https://id.atlassian.com/manage-profile/security/api-tokens)
-   - **Space Key**: The space where pages will be created (e.g., `PDLS`)
+Open **Settings → Confluence Vault Uploader** and fill in:
 
-3. Select the root page (optional):
-   - Paste a page URL directly (e.g., `https://example.atlassian.net/wiki/spaces/PDLS/pages/7279083749/Source+Code`)
-   - Or click **Browse** to select from a tree of available pages
-   - Leave empty to sync to the space root
+| Field | Description |
+|---|---|
+| **Confluence base URL** | e.g. `https://yourcompany.atlassian.net/wiki` |
+| **Username** | Your Atlassian account email |
+| **API token** | [Generate at Atlassian](https://id.atlassian.com/manage-profile/security/api-tokens) |
+| **Root page URL** | Paste the full URL of the Confluence page that will be the sync root (space key and page ID are extracted automatically). Leave empty to sync under the space root. |
+
+After filling in the root page URL, a confirmation line shows the extracted space and page ID. Use **Test Connection** to verify credentials before syncing.
 
 ## Usage
 
-1. In Obsidian, open the command palette (`Ctrl+P` / `Cmd+P`)
-2. Search for "Sync vault to Confluence"
-3. Wait for completion notification
+1. Open the command palette (`Ctrl+P` / `Cmd+P`)
+2. Run **Sync vault to Confluence**
+3. A progress notice appears for each file; a final notice reports success/failure counts
 
-The plugin will:
-- Create folder pages if they don't exist
-- Create/update file pages with content
-- Maintain the exact vault folder structure
-- Preserve Confluence version history on updates
+## Vault conventions
 
-## Example
+### Folder pages and MOC files
 
-If your vault has:
+A file whose name starts with `_` (e.g. `_Overview MOC.md`) is treated as the **content** of its parent folder's Confluence page rather than as a separate child page. This lets you write a rich index for each section.
+
 ```
-vault/
-├── Source Code/
-│   ├── Architecture.md
-│   ├── API Docs/
-│   │   └── REST.md
-│   └── Setup.md
+01 - Overview/
+├── _Overview MOC.md      ← becomes the body of the "01 - Overview" page
+├── Architecture.md       ← child page
+└── System Landscape.md   ← child page
 ```
 
-And you select "Source Code" as root, Confluence will have:
-```
-Source Code (root page)
-├── Architecture
-├── API Docs
-│   └── REST
-└── Setup
-```
+### Wiki links
+
+All standard Obsidian link formats are supported and resolved to real Confluence URLs in Phase 2:
+
+| Obsidian syntax | Result |
+|---|---|
+| `[[Page Name]]` | Link to that page |
+| `[[Folder/Page Name]]` | Link using a partial path (resolved from any depth) |
+| `[[Page Name\|Display text]]` | Link with custom display text |
+| `![[Page Name]]` | Embed converted to a link |
+
+### Callouts
+
+| Obsidian callout | Confluence macro |
+|---|---|
+| `> [!note]`, `> [!info]` | Info panel |
+| `> [!tip]`, `> [!success]` | Tip panel |
+| `> [!warning]`, `> [!caution]` | Warning panel |
+| `> [!danger]`, `> [!error]`, `> [!bug]` | Warning panel |
 
 ## Notes
-- Root page selection is optional; sync to space root if not specified
-- Existing pages are updated without losing version history
-- Markdown files in root vault directory sync directly under root/space
-- Empty folders create empty page containers (helpful for organization)
+
+- Pages are matched by title within their parent; renaming a file creates a new page (the old one is not deleted automatically)
+- The sync is safe to re-run; existing pages are updated in place
+- Images embedded via `![[file.jpg]]` become links (Confluence image upload is not yet supported)
+- Task list items (`- [ ]` / `- [x]`) are converted to `☐`/`☑` plain text, since Confluence storage format does not support HTML checkbox elements
