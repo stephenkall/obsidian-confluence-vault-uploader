@@ -88,3 +88,7 @@ All standard Obsidian link formats are supported and resolved to real Confluence
 - The sync is safe to re-run; existing pages are updated in place
 - Images embedded via `![[file.jpg]]` become links (Confluence image upload is not yet supported)
 - Task list items (`- [ ]` / `- [x]`) are converted to `☐`/`☑` plain text, since Confluence storage format does not support HTML checkbox elements
+
+## Privacy & permissions
+
+This plugin reads **every `.md` file in your vault** to build the page hierarchy and resolve cross-file links. No file content is sent anywhere except to the Confluence instance you configure. Your Confluence credentials (URL, username, API token) are stored locally in Obsidian's plugin data and are never transmitted to any third party.
