@@ -419,7 +419,9 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
           .replace(/&gt;/g, '>')
           .replace(/&amp;/g, '&')
           .trim();
-        return `<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">${language}</ac:parameter><ac:plain-text-body><![CDATA[${decoded}]]></ac:plain-text-body></ac:structured-macro>`;
+        // Escape ]]> so it doesn't terminate the CDATA section prematurely
+        const safe = decoded.replace(/\]\]>/g, ']]]]><![CDATA[>');
+        return `<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">${language}</ac:parameter><ac:plain-text-body><![CDATA[${safe}]]></ac:plain-text-body></ac:structured-macro>`;
       }
     );
 
@@ -432,7 +434,8 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
           .replace(/&gt;/g, '>')
           .replace(/&amp;/g, '&')
           .trim();
-        return `<ac:structured-macro ac:name="code"><ac:plain-text-body><![CDATA[${decoded}]]></ac:plain-text-body></ac:structured-macro>`;
+        const safe = decoded.replace(/\]\]>/g, ']]]]><![CDATA[>');
+        return `<ac:structured-macro ac:name="code"><ac:plain-text-body><![CDATA[${safe}]]></ac:plain-text-body></ac:structured-macro>`;
       }
     );
 
