@@ -1212,7 +1212,9 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
 
     for (const [title, pageId] of Object.entries(this.pageMap)) {
       processed += 1;
+      const progress = `(${processed}/${total})`;
       this.renderStatusBar(`updating links ${processed}/${total}`);
+      new Notice(`🔗 ${progress}: ${title.split('/').pop()}...`, 2000);
       if (!this.isSyncing) {
         this.logger.info('[updateAllPageLinks] Stopped by user');
         await this.saveSyncState();
