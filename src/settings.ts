@@ -201,11 +201,12 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
           })
       );
 
-    this.confirmEl = document.createElement('p');
-    this.confirmEl.className = 'setting-item-description';
-    this.confirmEl.textContent = this.plugin.settings.rootPageId
-      ? `✅ Selected: Space=${this.plugin.settings.spaceKey}, PageID=${this.plugin.settings.rootPageId}`
-      : '';
+    this.confirmEl = createEl('p', {
+      cls: 'setting-item-description',
+      text: this.plugin.settings.rootPageId
+        ? `✅ Selected: Space=${this.plugin.settings.spaceKey}, PageID=${this.plugin.settings.rootPageId}`
+        : ''
+    });
     setting.settingEl.insertAdjacentElement('afterend', this.confirmEl);
   }
 
@@ -227,7 +228,7 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
       .setName('Log level')
       .setDesc(
         'Controls how much detail is recorded in the sync log (see "Show Confluence sync log" command). ' +
-          'Errors are always recorded regardless of this setting. Verbose also prints per-request details to the developer console.'
+          'Errors are always recorded regardless of this setting.'
       )
       .addDropdown(dropdown =>
         dropdown

@@ -69,7 +69,7 @@ After filling in the root page URL, a confirmation line shows the extracted spac
 You never have to guess whether a sync is running, idle, or stuck:
 
 - The **status bar** (bottom of the Obsidian window) always shows the current state and updates per file during a sync. Click it to open the full status panel.
-- The **log level** setting (Settings → Confluence Vault Uploader → Sync visibility) controls how much detail is captured: `None` (errors only), `Normal` (per-file progress), or `Verbose` (per-request detail, also mirrored to the developer console). Errors are always captured regardless of this setting.
+- The **log level** setting (Settings → Confluence Vault Uploader → Sync visibility) controls how much detail is captured: `None` (errors only), `Normal` (per-file progress), or `Verbose` (per-request detail). Errors are always captured regardless of this setting. Sync failures are also printed to the developer console as a last resort even when the log viewer isn't open.
 - If a sync is interrupted by an unexpected error, it no longer fails silently — a notice explains what happened, progress up to that point is saved, and the failure is recorded in the log and in the status panel's "last sync" summary.
 
 ### Concurrent syncing
