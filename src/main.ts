@@ -732,7 +732,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     const parentId = await this.ensureParentPath(file.parent);
 
     this.logger.info(`[syncFile] Creating/updating page: ${title} (parent: ${parentId || 'root'})`, true);
-    const pageId = await this.createOrUpdatePage(title, body, parentId);
+    const pageId = await this.createOrUpdatePage(title, body, parentId, fullPath);
 
     // Register by full obsidian path (no extension) — the key format Phase 2 will look up
     this.pageMap[fullPath] = pageId;
@@ -826,16 +826,32 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
 
     this.logger.info(`[findOrCreateFolderPage] Creating new folder: ${title}`);
     const url = `${this.getConfluenceBaseUrl()}/api/v2/pages`;
-    const payload: Record<string, unknown> = {
-      spaceId: this.spaceId,
-      status: 'current',
-      title,
-      body: { value: '', representation: 'storage' }
+    const buildPayload = (t: string): Record<string, unknown> => {
+      const payload: Record<string, unknown> = {
+        spaceId: this.spaceId,
+        status: 'current',
+        title: t,
+        body: { value: '', representation: 'storage' }
+      };
+      if (parentPageId) payload.parentId = parentPageId;
+      return payload;
     };
-    if (parentPageId) payload.parentId = parentPageId;
 
-    const response = await this.requestConfluence<ConfluencePageResponse>(url, 'POST', payload);
-    this.logger.info(`[findOrCreateFolderPage] Created folder: ${title} (id: ${response.id})`);
+    let response: ConfluencePageResponse;
+    try {
+      response = await this.requestConfluence<ConfluencePageResponse>(url, 'POST', buildPayload(title));
+    } catch (error) {
+      // A create failure here is most often an unexpected title collision against Confluence
+      // content our local vault scan couldn't predict (e.g. a page left over from an earlier,
+      // buggier sync attempt, or one that a person created directly). Retry once with the full
+      // vault path as the title, which is guaranteed unique, instead of failing this folder.
+      if (title === folderFullPath) throw error;
+      const detail = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`[findOrCreateFolderPage] Create failed for "${title}", retrying with fully-qualified title "${folderFullPath}": ${detail}`);
+      response = await this.requestConfluence<ConfluencePageResponse>(url, 'POST', buildPayload(folderFullPath));
+    }
+
+    this.logger.info(`[findOrCreateFolderPage] Created folder: ${response.title} (id: ${response.id})`);
     // Register folder page so Phase 2 can resolve its links
     this.pageMap[folderName] = response.id;
     return response.id;
@@ -954,7 +970,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     };
   }
 
-  async createOrUpdatePage(title: string, body: { value: string; representation: string }, parentPageId: string): Promise<string> {
+  async createOrUpdatePage(title: string, body: { value: string; representation: string }, parentPageId: string, fallbackTitle?: string): Promise<string> {
     this.logger.info(`[createOrUpdatePage] Processing page: ${title} (parent: ${parentPageId || 'root'})`, true);
     const existing = await this.findPageByTitle(title, parentPageId);
     if (existing) {
@@ -964,7 +980,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       return existing.id;
     } else {
       this.logger.info(`[createOrUpdatePage] Creating new page: ${title}`, true);
-      const pageId = await this.createPage(title, body, parentPageId);
+      const pageId = await this.createPage(title, body, parentPageId, fallbackTitle);
       this.logger.info(`[createOrUpdatePage] ✅ Created: ${title}`, true);
       return pageId;
     }
@@ -1008,24 +1024,38 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     };
   }
 
-  async createPage(title: string, body: { value: string; representation: string }, parentPageId: string): Promise<string> {
+  async createPage(title: string, body: { value: string; representation: string }, parentPageId: string, fallbackTitle?: string): Promise<string> {
     const url = `${this.getConfluenceBaseUrl()}/api/v2/pages`;
 
-    const payload: Record<string, unknown> = {
-      spaceId: this.spaceId,
-      status: 'current',
-      title,
-      body
+    const buildPayload = (t: string): Record<string, unknown> => {
+      const payload: Record<string, unknown> = {
+        spaceId: this.spaceId,
+        status: 'current',
+        title: t,
+        body
+      };
+      if (parentPageId) payload.parentId = parentPageId;
+      return payload;
     };
-
-    if (parentPageId) {
-      payload.parentId = parentPageId;
-    }
 
     this.logger.info(`[createPage] POST to ${url}`, true);
     this.logger.info(`[createPage] Payload: title="${title}", representation="${body.representation}", bodyLength=${body.value.length}`, true);
-    const response = await this.requestConfluence<ConfluencePageResponse>(url, 'POST', payload);
-    this.logger.info(`[createPage] ✅ Created page ID: ${response.id}`, true);
+
+    let response: ConfluencePageResponse;
+    try {
+      response = await this.requestConfluence<ConfluencePageResponse>(url, 'POST', buildPayload(title));
+    } catch (error) {
+      // A create failure here is most often an unexpected title collision against Confluence
+      // content our local vault scan couldn't predict (e.g. a page left over from an earlier,
+      // buggier sync attempt, or one that a person created directly). Retry once with the full
+      // vault path as the title, which is guaranteed unique, instead of failing this file.
+      if (!fallbackTitle || fallbackTitle === title) throw error;
+      const detail = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`[createPage] Create failed for "${title}", retrying with fully-qualified title "${fallbackTitle}": ${detail}`);
+      response = await this.requestConfluence<ConfluencePageResponse>(url, 'POST', buildPayload(fallbackTitle));
+    }
+
+    this.logger.info(`[createPage] ✅ Created page ID: ${response.id} (title: ${response.title})`, true);
 
     // Track version for future updates
     this.pageVersions[response.id] = response.version.number;
