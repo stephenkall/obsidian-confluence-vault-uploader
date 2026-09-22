@@ -129,7 +129,7 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
           })
       );
 
-    containerEl.createEl('h3', { text: 'Sync visibility' });
+    new Setting(containerEl).setName('Sync visibility').setHeading();
 
     new Setting(containerEl)
       .setName('Log level')
@@ -230,7 +230,8 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
         new Notice('✅ Connection successful! (No page URL specified)');
       }
     } catch (error) {
-      new Notice(`❌ Connection failed: ${error}`);
+      const detail = error instanceof Error ? error.message : String(error);
+      new Notice(`❌ Connection failed: ${detail}`);
     }
   }
 

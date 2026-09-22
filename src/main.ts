@@ -70,13 +70,15 @@ class SyncLogger {
     if (level === 'none') return;
     if (verboseOnly && level !== 'verbose') return;
     this.record('info', message);
-    console.log(message);
+    // Only mirror to the console at the Verbose level — Normal-level activity is still
+    // fully available via "Show Confluence sync log" without spamming the console.
+    if (level === 'verbose') console.log(message);
   }
 
   warn(message: string): void {
     if (this.getLevel() === 'none') return;
     this.record('warn', message);
-    console.warn(message);
+    if (this.getLevel() === 'verbose') console.warn(message);
   }
 
   error(message: string): void {
@@ -428,7 +430,8 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       try {
         await this.saveSyncState();
       } catch (saveError) {
-        this.logger.error(`[Confluence Sync] Also failed to save progress after the error: ${saveError}`);
+        const saveDetail = saveError instanceof Error ? saveError.message : String(saveError);
+        this.logger.error(`[Confluence Sync] Also failed to save progress after the error: ${saveDetail}`);
       }
     } finally {
       this.isSyncing = false;
@@ -944,7 +947,8 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       await this.requestConfluence<ConfluencePageResponse>(url, 'PUT', payload);
       this.logger.info(`[updatePageContent] ✅ Updated content for page ${pageId}`, true);
     } catch (error) {
-      this.logger.error(`[updatePageContent] ❌ Failed to update page ${pageId}: ${error}`);
+      const detail = error instanceof Error ? error.message : String(error);
+      this.logger.error(`[updatePageContent] ❌ Failed to update page ${pageId}: ${detail}`);
       throw error;
     }
   }
@@ -1144,7 +1148,8 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
           this.logger.info(`[updateAllPageLinks] ✅ Updated links in: ${title}`, true);
         }
       } catch (error) {
-        this.logger.error(`[updateAllPageLinks] ❌ Failed to update ${title}: ${error}`);
+        const detail = error instanceof Error ? error.message : String(error);
+        this.logger.error(`[updateAllPageLinks] ❌ Failed to update ${title}: ${detail}`);
       }
     }
 
