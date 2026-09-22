@@ -11,6 +11,9 @@ Sync your entire Obsidian vault to Confluence, preserving the folder structure a
 - **Code block macros** — fenced code blocks with a language tag become Confluence code macros with syntax highlighting
 - **Two-phase sync** — Phase 1 creates all pages; Phase 2 wires up every cross-page link so nothing is left broken
 - **Incremental updates** — re-running only updates changed pages, preserving Confluence version history
+- **Live status** — a status bar item always shows idle/syncing/last-result state; click it (or run **Show Confluence sync status**) for details
+- **Configurable logging** — choose None/Normal/Verbose logging and inspect it any time with **Show Confluence sync log**, without opening the developer console
+- **Cache repair** — **Repair Confluence sync cache** validates every cached page mapping and clears stale entries that cause `404` errors, queuing the affected files for re-sync
 
 ## Installation
 
@@ -48,6 +51,26 @@ After filling in the root page URL, a confirmation line shows the extracted spac
 1. Open the command palette (`Ctrl+P` / `Cmd+P`)
 2. Run **Sync vault to Confluence**
 3. A progress notice appears for each file; a final notice reports success/failure counts
+
+### Commands
+
+| Command | Purpose |
+|---|---|
+| **Sync vault to Confluence** | Runs the full two-phase sync. Resumes automatically from the last checkpoint if a previous run stopped early. |
+| **Stop Confluence sync** | Cancels an in-progress sync after the current file finishes. Progress is saved. |
+| **Show Confluence sync status** | Opens a status panel: current state, progress, cached page count, log level, and the last completed sync's result. |
+| **Show Confluence sync log** | Opens the in-app sync log (respects the log level below), with copy-to-clipboard and clear actions. |
+| **Repair Confluence sync cache** | Validates every cached page mapping against Confluence and drops stale ones, queuing affected files for re-sync. Run this if sync reports `404` errors. |
+| **Clear Confluence sync cache** | Wipes all cached state; the next sync starts completely fresh. |
+| **Update Confluence page links (Phase 2)** | Re-runs only the cross-page link resolution step, without re-syncing page content. |
+
+### Sync visibility
+
+You never have to guess whether a sync is running, idle, or stuck:
+
+- The **status bar** (bottom of the Obsidian window) always shows the current state and updates per file during a sync. Click it to open the full status panel.
+- The **log level** setting (Settings → Confluence Vault Uploader → Sync visibility) controls how much detail is captured: `None` (errors only), `Normal` (per-file progress), or `Verbose` (per-request detail, also mirrored to the developer console). Errors are always captured regardless of this setting.
+- If a sync is interrupted by an unexpected error, it no longer fails silently — a notice explains what happened, progress up to that point is saved, and the failure is recorded in the log and in the status panel's "last sync" summary.
 
 ## Vault conventions
 
