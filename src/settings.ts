@@ -54,6 +54,7 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
     this.renderLogLevel(new Setting(containerEl));
     this.renderSyncStatus(new Setting(containerEl));
     this.renderRepairCache(new Setting(containerEl));
+    this.renderReconcileTitles(new Setting(containerEl));
 
     new Setting(containerEl).setName('Performance').setHeading();
 
@@ -105,6 +106,11 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
             name: 'Repair sync cache',
             desc: 'Checks every cached page mapping against Confluence and removes stale entries.',
             render: (setting: Setting) => this.renderRepairCache(setting)
+          },
+          {
+            name: 'Reconcile page titles',
+            desc: 'Renames already-synced pages to match the disambiguated title scheme.',
+            render: (setting: Setting) => this.renderReconcileTitles(setting)
           }
         ]
       },
@@ -263,6 +269,22 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
       .addButton(button =>
         button.setButtonText('Repair cache').onClick(async () => {
           await this.plugin.repairSyncCache();
+        })
+      );
+  }
+
+  private renderReconcileTitles(setting: Setting): void {
+    setting
+      .setName('Reconcile page titles')
+      .setDesc(
+        'When a file or folder name is used more than once in the vault, only newly-created pages get a disambiguated ' +
+          'title automatically — a page that already synced under its old bare name is left alone, cosmetically inconsistent ' +
+          'with its sibling. Run this to rename those to match. Safe to run any time sync is not active; some individual ' +
+          'renames may fail and be skipped (logged) rather than retried aggressively.'
+      )
+      .addButton(button =>
+        button.setButtonText('Reconcile titles').onClick(async () => {
+          await this.plugin.reconcileDuplicateTitles();
         })
       );
   }

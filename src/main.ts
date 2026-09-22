@@ -240,6 +240,12 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: 'reconcile-confluence-page-titles',
+      name: 'Reconcile Confluence page titles',
+      callback: async () => this.reconcileDuplicateTitles()
+    });
+
+    this.addCommand({
       id: 'show-confluence-sync-status',
       name: 'Show Confluence sync status',
       callback: () => this.openStatusModal()
@@ -415,6 +421,90 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     this.logger.info(`[Repair cache] ${message}`);
   }
 
+  // Renames already-synced pages whose current Confluence title doesn't match the disambiguated
+  // scheme (see computeTitleOverrides) — for example a page still titled "GUID.xml" from before
+  // disambiguation existed, whose sibling now correctly gets "seg_0/GUID.xml". This is opt-in and
+  // manual rather than automatic on every sync: on a vault with many collisions, renaming them
+  // all in one pass can itself trigger 409 conflicts against pages our local cache doesn't know
+  // about — safe to run any time, but expect some individual failures to be logged and skipped
+  // rather than retried aggressively.
+  async reconcileDuplicateTitles(): Promise<void> {
+    if (this.isSyncing) {
+      new Notice('⚠️ Cannot reconcile titles while a sync is running. Stop the sync first.');
+      return;
+    }
+    if (!this.validateSettings()) {
+      return;
+    }
+
+    await this.loadSyncState();
+
+    const files = this.app.vault.getMarkdownFiles();
+    if (files.length === 0) {
+      new Notice('No markdown files found in the vault.');
+      return;
+    }
+
+    this.computeTitleOverrides(files);
+    const overrides: Record<string, string> = { ...this.fileTitleOverrides, ...this.folderTitleOverrides };
+    const candidates = Object.entries(overrides).filter(([path]) => this.pageMap[path]);
+
+    if (candidates.length === 0) {
+      new Notice('No already-synced pages need renaming for consistency.');
+      return;
+    }
+
+    new Notice(`🔧 Checking ${candidates.length} page(s) for title consistency...`);
+    this.logger.info(
+      `[Reconcile titles] Checking ${candidates.length} candidate(s) (${this.duplicateBasenames.size} duplicate file name(s), ` +
+        `${this.duplicateFolderNames.size} duplicate folder name(s))`
+    );
+
+    let renamed = 0;
+    let failed = 0;
+    let checked = 0;
+    const concurrency = Math.max(1, this.settings.syncConcurrency || 1);
+
+    await this.runConcurrent(candidates, concurrency, async ([path, desiredTitle]) => {
+      const pageId = this.pageMap[path];
+      try {
+        // Serialize per page ID for the same reason Phase 2 does — some vault paths alias to
+        // the same Confluence page from this plugin's earlier, buggier sync history.
+        await this.withPageLock(pageId, async () => {
+          const url = `${this.getConfluenceBaseUrl()}/api/v2/pages/${pageId}?body-format=storage`;
+          const pageData = await this.requestConfluence<ConfluencePageResponse>(url, 'GET');
+          if (pageData.title === desiredTitle) return;
+
+          const payload: Record<string, unknown> = {
+            id: pageId,
+            status: 'current',
+            title: desiredTitle,
+            version: { number: pageData.version.number + 1 }
+          };
+          if (pageData.body?.storage) {
+            payload.body = { value: pageData.body.storage.value, representation: 'storage' };
+          }
+
+          await this.requestConfluence<ConfluencePageResponse>(`${this.getConfluenceBaseUrl()}/api/v2/pages/${pageId}`, 'PUT', payload);
+          renamed += 1;
+          this.logger.info(`[Reconcile titles] Renamed "${pageData.title}" → "${desiredTitle}" (${path})`);
+        });
+      } catch (error) {
+        failed += 1;
+        const detail = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`[Reconcile titles] Could not rename "${path}" to "${desiredTitle}": ${detail}`);
+      }
+
+      checked += 1;
+      this.renderStatusBar(`reconciling titles ${checked}/${candidates.length}`);
+    });
+
+    this.renderIdleStatusBar();
+    const message = `🔧 Title reconciliation complete: ${renamed} renamed, ${failed} failed, ${candidates.length - renamed - failed} already consistent.`;
+    new Notice(message, 7000);
+    this.logger.info(`[Reconcile titles] ${message}`);
+  }
+
   async syncVaultToConfluence() {
     if (!this.validateSettings()) {
       return;
@@ -520,75 +610,13 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       }
     }
 
-    // Confluence requires page titles to be unique within a space, regardless of hierarchy —
-    // unlike the filesystem, which allows the same filename in different folders. Vaults that
-    // pair exports under the same base name in different folders (e.g. a "logical" and
-    // "physical" version of the same GUID-named file) would otherwise collide on creation with
-    // "Request failed, status 400". Detect any file basename or folder name that appears more
-    // than once in the vault, and disambiguate only those with their full vault path as the
-    // Confluence title instead of the bare name.
-    const basenameCounts = new Map<string, number>();
-    for (const f of files) {
-      basenameCounts.set(f.basename, (basenameCounts.get(f.basename) ?? 0) + 1);
-    }
-    this.duplicateBasenames = new Set(
-      Array.from(basenameCounts.entries()).filter(([, count]) => count > 1).map(([name]) => name)
-    );
-
-    const folderFullPaths = new Set<string>();
-    for (const f of files) {
-      const parts = f.path.replace(/\.md$/, '').split('/');
-      parts.pop();
-      let cur = '';
-      for (const part of parts) {
-        cur = cur ? `${cur}/${part}` : part;
-        folderFullPaths.add(cur);
-      }
-    }
-    const folderNameCounts = new Map<string, number>();
-    for (const folderPath of folderFullPaths) {
-      const name = folderPath.split('/').pop() ?? folderPath;
-      folderNameCounts.set(name, (folderNameCounts.get(name) ?? 0) + 1);
-    }
-    this.duplicateFolderNames = new Set(
-      Array.from(folderNameCounts.entries()).filter(([, count]) => count > 1).map(([name]) => name)
-    );
-
-    // Resolve each collision group to the shortest titles that are unique within that group —
-    // e.g. two files named "1B6494AC-....xml" under ".../Table/seg_0/" and ".../table/seg_2/"
-    // only need "seg_0/1B6494AC-....xml" and "seg_2/1B6494AC-....xml", not their full paths.
-    const fileGroups = new Map<string, string[]>();
-    for (const f of files) {
-      if (!this.duplicateBasenames.has(f.basename)) continue;
-      const fullPath = f.path.replace(/\.md$/, '');
-      const group = fileGroups.get(f.basename) ?? [];
-      group.push(fullPath);
-      fileGroups.set(f.basename, group);
-    }
-    this.fileTitleOverrides = {};
-    for (const paths of fileGroups.values()) {
-      Object.assign(this.fileTitleOverrides, this.resolveUniqueTitles(paths));
-    }
-
-    const folderGroups = new Map<string, string[]>();
-    for (const folderPath of folderFullPaths) {
-      const name = folderPath.split('/').pop() ?? folderPath;
-      if (!this.duplicateFolderNames.has(name)) continue;
-      const group = folderGroups.get(name) ?? [];
-      group.push(folderPath);
-      folderGroups.set(name, group);
-    }
-    this.folderTitleOverrides = {};
-    for (const paths of folderGroups.values()) {
-      Object.assign(this.folderTitleOverrides, this.resolveUniqueTitles(paths));
-    }
-
+    this.computeTitleOverrides(files);
     if (this.duplicateBasenames.size > 0 || this.duplicateFolderNames.size > 0) {
       this.logger.warn(
         `[Confluence Sync] ${this.duplicateBasenames.size} file name(s) and ${this.duplicateFolderNames.size} folder name(s) ` +
           'are used more than once in the vault. Confluence requires unique page titles per space, so these will be titled ' +
           'with their full vault path instead of just the name to avoid collisions. A page that already synced under its old ' +
-          'bare title is left as-is (not automatically renamed) — this is purely cosmetic and does not affect sync correctness.'
+          'bare title is left as-is — run "Reconcile Confluence page titles" any time to rename those for consistency.'
       );
     }
 
@@ -767,6 +795,73 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     const workerCount = Math.max(1, Math.min(concurrency, items.length));
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
     return stoppedEarly;
+  }
+
+  // Confluence requires page titles to be unique within a space, regardless of hierarchy —
+  // unlike the filesystem, which allows the same filename in different folders. Vaults that pair
+  // exports under the same base name in different folders (e.g. a "logical" and "physical"
+  // version of the same GUID-named file) would otherwise collide on creation with "Request
+  // failed, status 400". Detect any file basename or folder name that appears more than once in
+  // the vault, and populate duplicateBasenames/duplicateFolderNames plus the resolved
+  // disambiguated titles in fileTitleOverrides/folderTitleOverrides for just those. Shared by
+  // the main sync (applies overrides going forward) and reconcileDuplicateTitles (renames
+  // already-synced pages to match).
+  private computeTitleOverrides(files: TFile[]): void {
+    const basenameCounts = new Map<string, number>();
+    for (const f of files) {
+      basenameCounts.set(f.basename, (basenameCounts.get(f.basename) ?? 0) + 1);
+    }
+    this.duplicateBasenames = new Set(
+      Array.from(basenameCounts.entries()).filter(([, count]) => count > 1).map(([name]) => name)
+    );
+
+    const folderFullPaths = new Set<string>();
+    for (const f of files) {
+      const parts = f.path.replace(/\.md$/, '').split('/');
+      parts.pop();
+      let cur = '';
+      for (const part of parts) {
+        cur = cur ? `${cur}/${part}` : part;
+        folderFullPaths.add(cur);
+      }
+    }
+    const folderNameCounts = new Map<string, number>();
+    for (const folderPath of folderFullPaths) {
+      const name = folderPath.split('/').pop() ?? folderPath;
+      folderNameCounts.set(name, (folderNameCounts.get(name) ?? 0) + 1);
+    }
+    this.duplicateFolderNames = new Set(
+      Array.from(folderNameCounts.entries()).filter(([, count]) => count > 1).map(([name]) => name)
+    );
+
+    // Resolve each collision group to the shortest titles that are unique within that group —
+    // e.g. two files named "1B6494AC-....xml" under ".../Table/seg_0/" and ".../table/seg_2/"
+    // only need "seg_0/1B6494AC-....xml" and "seg_2/1B6494AC-....xml", not their full paths.
+    const fileGroups = new Map<string, string[]>();
+    for (const f of files) {
+      if (!this.duplicateBasenames.has(f.basename)) continue;
+      const fullPath = f.path.replace(/\.md$/, '');
+      const group = fileGroups.get(f.basename) ?? [];
+      group.push(fullPath);
+      fileGroups.set(f.basename, group);
+    }
+    this.fileTitleOverrides = {};
+    for (const paths of fileGroups.values()) {
+      Object.assign(this.fileTitleOverrides, this.resolveUniqueTitles(paths));
+    }
+
+    const folderGroups = new Map<string, string[]>();
+    for (const folderPath of folderFullPaths) {
+      const name = folderPath.split('/').pop() ?? folderPath;
+      if (!this.duplicateFolderNames.has(name)) continue;
+      const group = folderGroups.get(name) ?? [];
+      group.push(folderPath);
+      folderGroups.set(name, group);
+    }
+    this.folderTitleOverrides = {};
+    for (const paths of folderGroups.values()) {
+      Object.assign(this.folderTitleOverrides, this.resolveUniqueTitles(paths));
+    }
   }
 
   // Given a group of full vault paths that all end in the same basename, returns the shortest
