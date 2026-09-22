@@ -857,28 +857,41 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
   }
 
   async findPageByTitle(title: string, parentPageId?: string): Promise<{ id: string; version: number } | null> {
-    const url = `${this.getConfluenceBaseUrl()}/rest/api/content?title=${encodeURIComponent(title)}&spaceKey=${encodeURIComponent(this.settings.spaceKey)}&expand=version`;
+    // expand=ancestors is required for the parent-disambiguation below — without it, every
+    // result's `ancestors` is undefined, so the "find the child of this exact parent" check
+    // silently never matches and the code always falls back to the first search result. When
+    // two pages/folders share a title anywhere in the space, that first result can belong to
+    // the wrong parent (or later be deleted), and using its ID as a parentId elsewhere then
+    // fails with a 404.
+    const url = `${this.getConfluenceBaseUrl()}/rest/api/content?title=${encodeURIComponent(title)}&spaceKey=${encodeURIComponent(this.settings.spaceKey)}&expand=version,ancestors`;
 
     const response = await this.requestConfluence<ConfluenceSearchResponse>(url, 'GET');
-    if (response && response.results && response.results.length > 0) {
-      let targetPage = response.results[0];
+    if (!response || !response.results || response.results.length === 0) {
+      return null;
+    }
 
-      if (parentPageId && response.results.length > 1) {
-        const childPage = response.results.find(p =>
-          p.ancestors?.some(a => a.id === parentPageId)
-        );
-        if (childPage) {
-          targetPage = childPage;
-        }
+    if (parentPageId) {
+      // A title match only counts if it is actually a descendant of the expected parent.
+      // Titles like "Data" or "Security" are common across many modules in a documentation
+      // vault, so falling back to "the first search result" when none of them match would
+      // silently reuse an unrelated (or since-deleted) page's ID — the ID then 404s the next
+      // time it's used as a parentId or updated. Treat "no match under this parent" as "does
+      // not exist yet" so the caller creates a new page instead.
+      const childPage = response.results.find(p => p.ancestors?.some(a => a.id === parentPageId));
+      if (!childPage) {
+        return null;
       }
-
       return {
-        id: targetPage.id,
-        version: targetPage.version?.number ?? 1
+        id: childPage.id,
+        version: childPage.version?.number ?? 1
       };
     }
 
-    return null;
+    const targetPage = response.results[0];
+    return {
+      id: targetPage.id,
+      version: targetPage.version?.number ?? 1
+    };
   }
 
   async createPage(title: string, body: { value: string; representation: string }, parentPageId: string): Promise<string> {
