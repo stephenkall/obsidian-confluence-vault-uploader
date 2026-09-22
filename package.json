@@ -1,6 +1,6 @@
 {
   "name": "confluence-vault-uploader",
-  "version": "0.0.44",
+  "version": "0.0.45",
   "description": "Obsidian plugin to upload an entire vault to Confluence.",
   "main": "main.js",
   "scripts": {
