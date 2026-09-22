@@ -17,11 +17,11 @@ Sync your entire Obsidian vault to Confluence, preserving the folder structure a
 
 ## Installation
 
-> **Not yet in the Obsidian community plugin list.** Install manually for now.
+> **Not yet in Obsidian's official Community Plugins directory** (submission pending — see below). Install manually for now. Because Obsidian's built-in "Check for updates" only manages plugins installed through that official directory, a manually installed copy will **not** auto-update; repeat these steps for each new release, or watch/star the repo for release notifications.
 
-1. Download `main.js` and `manifest.json` from the [latest release](https://github.com/stephenkall/obsidian-confluence-vault-uploader/releases)
-2. Create the folder `<your-vault>/.obsidian/plugins/obsidian-confluence-vault-uploader/`
-3. Copy both files into that folder
+1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/stephenkall/obsidian-confluence-vault-uploader/releases)
+2. Create the folder `<your-vault>/.obsidian/plugins/confluence-vault-uploader/` — the folder name must match the `id` in `manifest.json` (`confluence-vault-uploader`)
+3. Copy all three files into that folder
 4. In Obsidian: **Settings → Community plugins → reload**, then enable **Confluence Vault Uploader**
 
 **To build from source:**
@@ -30,7 +30,7 @@ git clone https://github.com/stephenkall/obsidian-confluence-vault-uploader.git
 cd obsidian-confluence-vault-uploader
 npm install
 npm run build
-# copy main.js + manifest.json to your vault's plugin folder
+# copy main.js + manifest.json + styles.css to your vault's plugin folder
 ```
 
 ## Configuration

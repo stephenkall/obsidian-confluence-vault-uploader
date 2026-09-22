@@ -71,18 +71,24 @@ class SyncLogger {
     if (verboseOnly && level !== 'verbose') return;
     this.record('info', message);
     // Only mirror to the console at the Verbose level — Normal-level activity is still
-    // fully available via "Show Confluence sync log" without spamming the console.
+    // fully available via "Show Confluence sync log" without spamming the console. This is
+    // the explicit, user-controlled behavior documented for the Verbose log level.
+    // eslint-disable-next-line no-console
     if (level === 'verbose') console.log(message);
   }
 
   warn(message: string): void {
     if (this.getLevel() === 'none') return;
     this.record('warn', message);
+    // eslint-disable-next-line no-console
     if (this.getLevel() === 'verbose') console.warn(message);
   }
 
   error(message: string): void {
     this.record('error', message);
+    // Sync failures must remain visible in the console even at the default log level —
+    // this is the last-resort diagnostic path when the in-app log viewer isn't open.
+    // eslint-disable-next-line no-console
     console.error(message);
   }
 
