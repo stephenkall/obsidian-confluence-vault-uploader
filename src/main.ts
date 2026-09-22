@@ -48,6 +48,13 @@ interface RequestError {
   body?: string;
 }
 
+interface TitleLookupResult {
+  match: { id: string; version: number } | null;
+  // True when a page with this title exists somewhere in the space, but not as a child of the
+  // requested parent — meaning a create with the bare title would collide with that other page.
+  existsElsewhere: boolean;
+}
+
 type LogEntryLevel = 'info' | 'warn' | 'error';
 
 interface LogEntry {
@@ -950,15 +957,22 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     const title = this.folderTitleOverrides[folderFullPath] ?? folderName;
 
     this.logger.info(`[findOrCreateFolderPage] Looking for folder: ${title} (parent: ${parentPageId || 'root'})`, true);
-    const existing = await this.findPageByTitle(title, parentPageId);
-    if (existing) {
-      this.logger.info(`[findOrCreateFolderPage] Found existing folder: ${title} (id: ${existing.id})`, true);
+    const { match, existsElsewhere } = await this.findPageByTitle(title, parentPageId);
+    if (match) {
+      this.logger.info(`[findOrCreateFolderPage] Found existing folder: ${title} (id: ${match.id})`, true);
       // Register folder page so Phase 2 can resolve its links
-      this.pageMap[folderName] = existing.id;
-      return existing.id;
+      this.pageMap[folderName] = match.id;
+      return match.id;
     }
 
-    this.logger.info(`[findOrCreateFolderPage] Creating new folder: ${title}`);
+    // If the bare title is already taken by an unrelated page elsewhere in the space, go
+    // straight to the fully-qualified title instead of attempting the doomed bare one first.
+    const createTitle = existsElsewhere ? folderFullPath : title;
+    if (existsElsewhere) {
+      this.logger.info(`[findOrCreateFolderPage] "${title}" is already used elsewhere in the space; creating "${folderFullPath}" instead`, true);
+    }
+
+    this.logger.info(`[findOrCreateFolderPage] Creating new folder: ${createTitle}`);
     const url = `${this.getConfluenceBaseUrl()}/api/v2/pages`;
     const buildPayload = (t: string): Record<string, unknown> => {
       const payload: Record<string, unknown> = {
@@ -971,19 +985,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       return payload;
     };
 
-    let response: ConfluencePageResponse;
-    try {
-      response = await this.requestConfluence<ConfluencePageResponse>(url, 'POST', buildPayload(title));
-    } catch (error) {
-      // A create failure here is most often an unexpected title collision against Confluence
-      // content our local vault scan couldn't predict (e.g. a page left over from an earlier,
-      // buggier sync attempt, or one that a person created directly). Retry once with the full
-      // vault path as the title, which is guaranteed unique, instead of failing this folder.
-      if (title === folderFullPath) throw error;
-      const detail = error instanceof Error ? error.message : String(error);
-      this.logger.warn(`[findOrCreateFolderPage] Create failed for "${title}", retrying with fully-qualified title "${folderFullPath}": ${detail}`);
-      response = await this.requestConfluence<ConfluencePageResponse>(url, 'POST', buildPayload(folderFullPath));
-    }
+    const response = await this.createPageWithTitleFallback(url, buildPayload, [createTitle, folderFullPath], '[findOrCreateFolderPage]');
 
     this.logger.info(`[findOrCreateFolderPage] Created folder: ${response.title} (id: ${response.id})`);
     // Register folder page so Phase 2 can resolve its links
@@ -1106,21 +1108,27 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
 
   async createOrUpdatePage(title: string, body: { value: string; representation: string }, parentPageId: string, fallbackTitle?: string): Promise<string> {
     this.logger.info(`[createOrUpdatePage] Processing page: ${title} (parent: ${parentPageId || 'root'})`, true);
-    const existing = await this.findPageByTitle(title, parentPageId);
-    if (existing) {
-      this.logger.info(`[createOrUpdatePage] Updating existing page: ${title} (id: ${existing.id}, version: ${existing.version})`, true);
-      await this.updatePage(existing.id, existing.version, title, body, parentPageId);
+    const { match, existsElsewhere } = await this.findPageByTitle(title, parentPageId);
+    if (match) {
+      this.logger.info(`[createOrUpdatePage] Updating existing page: ${title} (id: ${match.id}, version: ${match.version})`, true);
+      await this.updatePage(match.id, match.version, title, body, parentPageId);
       this.logger.info(`[createOrUpdatePage] ✅ Updated: ${title}`, true);
-      return existing.id;
+      return match.id;
     } else {
-      this.logger.info(`[createOrUpdatePage] Creating new page: ${title}`, true);
-      const pageId = await this.createPage(title, body, parentPageId, fallbackTitle);
-      this.logger.info(`[createOrUpdatePage] ✅ Created: ${title}`, true);
+      // If the bare title is already taken by an unrelated page elsewhere in the space, go
+      // straight to the fully-qualified title instead of attempting the doomed bare one first.
+      const createTitle = existsElsewhere && fallbackTitle ? fallbackTitle : title;
+      if (existsElsewhere && fallbackTitle) {
+        this.logger.info(`[createOrUpdatePage] "${title}" is already used elsewhere in the space; creating "${fallbackTitle}" instead`, true);
+      }
+      this.logger.info(`[createOrUpdatePage] Creating new page: ${createTitle}`, true);
+      const pageId = await this.createPage(createTitle, body, parentPageId, fallbackTitle);
+      this.logger.info(`[createOrUpdatePage] ✅ Created: ${createTitle}`, true);
       return pageId;
     }
   }
 
-  async findPageByTitle(title: string, parentPageId?: string): Promise<{ id: string; version: number } | null> {
+  async findPageByTitle(title: string, parentPageId?: string): Promise<TitleLookupResult> {
     // expand=ancestors is required for the parent-disambiguation below — without it, every
     // result's `ancestors` is undefined, so the "find the child of this exact parent" check
     // silently never matches and the code always falls back to the first search result. When
@@ -1131,7 +1139,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
 
     const response = await this.requestConfluence<ConfluenceSearchResponse>(url, 'GET');
     if (!response || !response.results || response.results.length === 0) {
-      return null;
+      return { match: null, existsElsewhere: false };
     }
 
     if (parentPageId) {
@@ -1139,22 +1147,24 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       // Titles like "Data" or "Security" are common across many modules in a documentation
       // vault, so falling back to "the first search result" when none of them match would
       // silently reuse an unrelated (or since-deleted) page's ID — the ID then 404s the next
-      // time it's used as a parentId or updated. Treat "no match under this parent" as "does
-      // not exist yet" so the caller creates a new page instead.
+      // time it's used as a parentId or updated.
       const childPage = response.results.find(p => p.ancestors?.some(a => a.id === parentPageId));
       if (!childPage) {
-        return null;
+        // The title exists, just not under this parent — creating with the bare title would
+        // collide with that other page. Tell the caller so it can go straight to a qualified
+        // title for the create instead of attempting the bare one and reacting to the 400.
+        return { match: null, existsElsewhere: true };
       }
       return {
-        id: childPage.id,
-        version: childPage.version?.number ?? 1
+        match: { id: childPage.id, version: childPage.version?.number ?? 1 },
+        existsElsewhere: false
       };
     }
 
     const targetPage = response.results[0];
     return {
-      id: targetPage.id,
-      version: targetPage.version?.number ?? 1
+      match: { id: targetPage.id, version: targetPage.version?.number ?? 1 },
+      existsElsewhere: false
     };
   }
 
@@ -1175,19 +1185,8 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     this.logger.info(`[createPage] POST to ${url}`, true);
     this.logger.info(`[createPage] Payload: title="${title}", representation="${body.representation}", bodyLength=${body.value.length}`, true);
 
-    let response: ConfluencePageResponse;
-    try {
-      response = await this.requestConfluence<ConfluencePageResponse>(url, 'POST', buildPayload(title));
-    } catch (error) {
-      // A create failure here is most often an unexpected title collision against Confluence
-      // content our local vault scan couldn't predict (e.g. a page left over from an earlier,
-      // buggier sync attempt, or one that a person created directly). Retry once with the full
-      // vault path as the title, which is guaranteed unique, instead of failing this file.
-      if (!fallbackTitle || fallbackTitle === title) throw error;
-      const detail = error instanceof Error ? error.message : String(error);
-      this.logger.warn(`[createPage] Create failed for "${title}", retrying with fully-qualified title "${fallbackTitle}": ${detail}`);
-      response = await this.requestConfluence<ConfluencePageResponse>(url, 'POST', buildPayload(fallbackTitle));
-    }
+    const candidates = fallbackTitle ? [title, fallbackTitle] : [title];
+    const response = await this.createPageWithTitleFallback(url, buildPayload, candidates, '[createPage]');
 
     this.logger.info(`[createPage] ✅ Created page ID: ${response.id} (title: ${response.title})`, true);
 
@@ -1242,6 +1241,40 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       this.logger.error(`[updatePageContent] ❌ Failed to update page ${pageId}: ${detail}`);
       throw error;
     }
+  }
+
+  // Tries each candidate title in turn (deduplicated, in order), returning the first successful
+  // create. This vault has been synced across many plugin versions with different title schemes
+  // over time, so more than one candidate can collide with an orphaned page left over from an
+  // earlier attempt — the final candidate always carries a short unique suffix, so this is
+  // guaranteed to eventually succeed rather than leaving a file permanently stuck.
+  private async createPageWithTitleFallback(
+    url: string,
+    buildPayload: (title: string) => Record<string, unknown>,
+    candidateTitles: string[],
+    logPrefix: string
+  ): Promise<ConfluencePageResponse> {
+    const titles = Array.from(new Set(candidateTitles.filter((t): t is string => Boolean(t))));
+    const base = titles[titles.length - 1] ?? candidateTitles[0];
+    titles.push(`${base} (${this.uniqueSuffix()})`);
+
+    let lastError: unknown;
+    for (let i = 0; i < titles.length; i++) {
+      try {
+        return await this.requestConfluence<ConfluencePageResponse>(url, 'POST', buildPayload(titles[i]));
+      } catch (error) {
+        lastError = error;
+        if (i < titles.length - 1) {
+          const detail = error instanceof Error ? error.message : String(error);
+          this.logger.warn(`${logPrefix} Create failed for "${titles[i]}", retrying with "${titles[i + 1]}": ${detail}`);
+        }
+      }
+    }
+    throw lastError;
+  }
+
+  private uniqueSuffix(): string {
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   }
 
   async requestConfluence<T>(url: string, method: string, body?: unknown, attempt = 1): Promise<T> {
