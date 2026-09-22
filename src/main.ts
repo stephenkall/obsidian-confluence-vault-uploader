@@ -186,7 +186,14 @@ class SyncLogModal extends Modal {
 export default class ConfluenceVaultUploaderPlugin extends Plugin {
   settings: ConfluenceVaultUploaderSettings = DEFAULT_SETTINGS;
   readonly logger = new SyncLogger(() => this.settings.logLevel);
-  private pageCache: Record<string, { id: string; version: number }> = {};
+  // Maps a folder's full vault path to the in-flight (or resolved) promise for its Confluence
+  // page ID. Memoizing the *promise*, not just the eventual ID, is what makes concurrent syncing
+  // safe: if two files need the same not-yet-created ancestor folder at the same time, the
+  // second one awaits the first's in-flight request instead of racing it with a duplicate create.
+  private folderPagePromises: Map<string, Promise<string>> = new Map();
+  // Serializes Phase 2 operations per Confluence page ID (see withPageLock) — guards against
+  // two vault paths that alias to the same page ID racing its version number under concurrency.
+  private pageLocks: Map<string, Promise<void>> = new Map();
   private pageMap: Record<string, string> = {}; // obsidianPath (no ext) → confluencePageId
   private nameToPath: Record<string, string> = {}; // basename (no ext) → full obsidian path (no ext)
   private pageVersions: Record<string, number> = {}; // pageId → version for updates
@@ -338,7 +345,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
 
   private async clearCache() {
     this.clearSyncState();
-    this.pageCache = {};
+    this.folderPagePromises.clear();
     // Persist the cleared state so next run starts fresh
     await this.saveData({ ...this.settings, syncState: null, lastSyncSummary: this.lastSyncSummary });
     new Notice('✅ Confluence sync cache cleared. Next sync will start fresh.');
@@ -592,26 +599,19 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     }
 
     this.logger.info(`[Confluence Sync] Starting: ${files.length} total files, ${this.processedFiles.size} already synced`);
-    this.pageCache = {};
+    this.folderPagePromises.clear();
     let successCount = 0;
     let failureCount = 0;
+    let completedCount = 0;
     const filesToSync = files.filter(f => !this.processedFiles.has(f.path));
     summary.totalFiles = filesToSync.length;
     this.currentPhase = 'syncing files';
 
-    new Notice(`📄 Syncing ${filesToSync.length} file(s)...`);
-    for (let i = 0; i < filesToSync.length; i++) {
-      if (!this.isSyncing) {
-        this.logger.info(`[Confluence Sync] Stopped by user at file ${i + 1}/${filesToSync.length}`);
-        summary.stopped = true;
-        await this.saveSyncState();
-        new Notice(`⏹️ Sync paused. Progress saved. ${successCount} files synced, ${this.processedFiles.size} total.`);
-        return;
-      }
+    const concurrency = Math.max(1, this.settings.syncConcurrency || 1);
+    new Notice(`📄 Syncing ${filesToSync.length} file(s) (${concurrency} at a time)...`);
 
-      const file = filesToSync[i];
-      const progress = `(${i + 1}/${filesToSync.length})`;
-      this.renderStatusBar(`syncing ${i + 1}/${filesToSync.length} (${failureCount} failed) — ${file.basename}`);
+    const stoppedDuringFiles = await this.runConcurrent(filesToSync, concurrency, async (file, index) => {
+      const progress = `(${index + 1}/${filesToSync.length})`;
       try {
         this.logger.info(`[Confluence Sync] Processing: ${file.path}`, true);
         new Notice(`⏳ ${progress}: ${file.basename}...`, 2000);
@@ -620,16 +620,11 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
         successCount += 1;
         summary.succeeded = successCount;
         this.logger.info(`[Confluence Sync] ✅ Success: ${file.path}`);
-
-        if (successCount % 10 === 0 || Date.now() - this.lastCheckpointAt > 15000) {
-          await this.saveSyncState();
-          this.lastCheckpointAt = Date.now();
-        }
       } catch (rawError) {
         const error = rawError as RequestError;
         const status = error.status ?? '';
         const detail = rawError instanceof Error ? rawError.message : String(rawError);
-        // Obsidian's RequestUrlError carries the response body in .body (not .message)
+        // requestConfluence() attaches the real Confluence response body as .body (see there).
         const responseBody = error.body ?? '';
         this.logger.error(`[Confluence Sync] ❌ Failed: ${file.path} | status=${status} | ${detail}`);
         if (responseBody) this.logger.error(`[Confluence Sync] ❌ Response body: ${responseBody.substring(0, 2000)}`);
@@ -637,6 +632,21 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
         summary.failed = failureCount;
         new Notice(`❌ Failed to sync ${file.basename}: ${detail}`, 5000);
       }
+
+      completedCount += 1;
+      this.renderStatusBar(`syncing ${completedCount}/${filesToSync.length} (${failureCount} failed)`);
+      if (successCount % 10 === 0 || Date.now() - this.lastCheckpointAt > 15000) {
+        await this.saveSyncState();
+        this.lastCheckpointAt = Date.now();
+      }
+    });
+
+    if (stoppedDuringFiles) {
+      this.logger.info(`[Confluence Sync] Stopped by user. ${completedCount}/${filesToSync.length} files processed before stopping.`);
+      summary.stopped = true;
+      await this.saveSyncState();
+      new Notice(`⏹️ Sync paused. Progress saved. ${successCount} files synced, ${this.processedFiles.size} total.`);
+      return;
     }
 
     // Phase 2: Update links in all pages
@@ -740,6 +750,31 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     this.logger.info(`[syncFile] ✅ Completed: ${file.path} → Confluence page ${pageId} (parent: ${parentId || 'root'})`, true);
   }
 
+  // Runs `handler` over `items` with up to `concurrency` running at once, pulling the next item
+  // from a shared cursor as each worker frees up (rather than fixed batches), so a few slow
+  // requests don't stall an otherwise-idle worker slot. Stops dispatching new items as soon as
+  // the user presses Stop, but lets whatever's already in flight finish rather than aborting
+  // mid-request. Returns true if the run was stopped early.
+  private async runConcurrent<T>(items: T[], concurrency: number, handler: (item: T, index: number) => Promise<void>): Promise<boolean> {
+    let nextIndex = 0;
+    let stoppedEarly = false;
+
+    const worker = async (): Promise<void> => {
+      while (nextIndex < items.length) {
+        if (!this.isSyncing) {
+          stoppedEarly = true;
+          return;
+        }
+        const index = nextIndex++;
+        await handler(items[index], index);
+      }
+    };
+
+    const workerCount = Math.max(1, Math.min(concurrency, items.length));
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    return stoppedEarly;
+  }
+
   // Given a group of full vault paths that all end in the same basename, returns the shortest
   // "last N path segments" title for each path that is unique across the whole group. Since
   // full paths are inherently unique, this always terminates (at worst, depth == full path).
@@ -783,31 +818,41 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       return this.settings.rootPageId || '';
     }
 
-    const folderPath = folder.path;
-    if (this.pageCache[folderPath]) {
-      return this.pageCache[folderPath].id;
-    }
-
+    const pathParts = folder.path.split('/').filter(p => p);
     let parentId = this.settings.rootPageId || '';
-
-    const pathParts = folderPath.split('/').filter(p => p);
     let currentPath = '';
 
+    // Each level must be resolved before the next (a child needs its parent's real page ID),
+    // so this stays a sequential await *within* one file's own ancestor chain. Concurrent files
+    // that share a prefix of this chain safely coalesce onto the same in-flight promise via
+    // getOrCreateFolderPageId, instead of racing to create the same folder twice.
     for (const part of pathParts) {
       currentPath = currentPath ? `${currentPath}/${part}` : part;
-
-      if (!this.pageCache[currentPath]) {
-        const parentPageId = parentId || this.settings.rootPageId || '';
-        const pageId = await this.findOrCreateFolderPage(part, parentPageId, currentPath);
-        this.pageCache[currentPath] = { id: pageId, version: 1 };
-        // Register folder by full vault path so Phase 2 resolves [[FolderName]] links exactly
-        this.pageMap[currentPath] = pageId;
-      }
-
-      parentId = this.pageCache[currentPath].id;
+      parentId = await this.getOrCreateFolderPageId(currentPath, part, parentId);
     }
 
     return parentId;
+  }
+
+  private getOrCreateFolderPageId(currentPath: string, folderName: string, parentPageId: string): Promise<string> {
+    const inFlight = this.folderPagePromises.get(currentPath);
+    if (inFlight) return inFlight;
+
+    const promise = this.findOrCreateFolderPage(folderName, parentPageId, currentPath)
+      .then(pageId => {
+        // Register folder by full vault path so Phase 2 resolves [[FolderName]] links exactly
+        this.pageMap[currentPath] = pageId;
+        return pageId;
+      })
+      .catch(error => {
+        // Don't permanently cache a failed creation — remove it so a later call (later in this
+        // same run, or a resumed one) can retry instead of being stuck with a rejected promise.
+        this.folderPagePromises.delete(currentPath);
+        throw error;
+      });
+
+    this.folderPagePromises.set(currentPath, promise);
+    return promise;
   }
 
   private async findOrCreateFolderPage(folderName: string, parentPageId: string, folderFullPath: string): Promise<string> {
@@ -1110,7 +1155,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     }
   }
 
-  async requestConfluence<T>(url: string, method: string, body?: unknown): Promise<T> {
+  async requestConfluence<T>(url: string, method: string, body?: unknown, attempt = 1): Promise<T> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       Authorization: `Basic ${btoa(`${this.settings.username}:${this.settings.apiToken}`)}`
@@ -1119,7 +1164,11 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     const requestOptions: RequestUrlParam = {
       url,
       method,
-      headers
+      headers,
+      // Obsidian's requestUrl throws before we can inspect the response for a status >= 400 by
+      // default, which meant our own error logging below never actually ran, and made proper
+      // 429 (rate limit) detection impossible. Handle the status ourselves instead.
+      throw: false
     };
 
     if (body) {
@@ -1130,16 +1179,42 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     const response = await requestUrl(requestOptions);
     this.logger.info(`[requestConfluence] Response status: ${response.status}`, true);
 
+    if (response.status === 429) {
+      const maxAttempts = 5;
+      if (attempt >= maxAttempts) {
+        throw new Error(`Confluence rate limit exceeded after ${attempt} attempts (429) for ${method} ${url}`);
+      }
+      const retryAfterHeader = response.headers?.['retry-after'] ?? response.headers?.['Retry-After'];
+      const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : NaN;
+      // Prefer the server's Retry-After when present; otherwise back off exponentially
+      // (1s, 2s, 4s, 8s...). Occasional rate limiting is expected and self-correcting,
+      // especially at higher sync concurrency settings — not a sync failure.
+      const waitSeconds = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds : 2 ** (attempt - 1);
+      this.logger.warn(`[requestConfluence] Rate limited (429) on ${method} ${url}, waiting ${waitSeconds}s before retry ${attempt}/${maxAttempts - 1}...`);
+      await new Promise(resolve => setTimeout(resolve, waitSeconds * 1000));
+      return this.requestConfluence<T>(url, method, body, attempt + 1);
+    }
+
     if (response.status < 200 || response.status >= 300) {
       let errorMsg = 'Unknown error';
-      if (response.text) {
-        errorMsg = response.text;
-      } else if (response.json) {
-        errorMsg = JSON.stringify(response.json);
+      try {
+        if (response.text) {
+          errorMsg = response.text;
+        } else if (response.json) {
+          errorMsg = JSON.stringify(response.json);
+        }
+      } catch {
+        // Response body wasn't parseable JSON/text; fall back to the generic message below.
       }
 
       this.logger.error(`[requestConfluence] ERROR ${response.status} on ${method} ${url}: ${errorMsg.substring(0, 1000)}`);
-      throw new Error(`Confluence request failed (${response.status}): ${errorMsg}`);
+      // Attach status/body as plain properties so callers that inspect them (e.g. the per-file
+      // error handler in runSync) get the real values now that we handle the response ourselves,
+      // instead of relying on Obsidian's default-thrown error (which never populated .body).
+      const requestError = new Error(`Confluence request failed (${response.status}): ${errorMsg}`) as Error & { status?: number; body?: string };
+      requestError.status = response.status;
+      requestError.body = errorMsg;
+      throw requestError;
     }
     return response.json as T;
   }
@@ -1205,114 +1280,128 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
   }
 
   private async updateAllPageLinks() {
-    this.logger.info(`[updateAllPageLinks] Starting phase 2 with ${Object.keys(this.pageMap).length} pages`);
+    const entries = Object.entries(this.pageMap);
+    const total = entries.length;
+    this.logger.info(`[updateAllPageLinks] Starting phase 2 with ${total} pages`);
     let updated = 0;
-    const total = Object.keys(this.pageMap).length;
     let processed = 0;
+    const concurrency = Math.max(1, this.settings.syncConcurrency || 1);
 
-    for (const [title, pageId] of Object.entries(this.pageMap)) {
-      processed += 1;
-      const progress = `(${processed}/${total})`;
-      this.renderStatusBar(`updating links ${processed}/${total}`);
+    const stoppedEarly = await this.runConcurrent(entries, concurrency, async ([title, pageId], index) => {
+      const progress = `(${index + 1}/${total})`;
       new Notice(`🔗 ${progress}: ${title.split('/').pop()}...`, 2000);
-      if (!this.isSyncing) {
-        this.logger.info('[updateAllPageLinks] Stopped by user');
-        await this.saveSyncState();
-        new Notice(`⏹️ Link update paused. ${updated} pages updated so far.`);
-        return;
-      }
 
       try {
-        // Fetch current page content — must request body-format=storage explicitly
-        const url = `${this.getConfluenceBaseUrl()}/api/v2/pages/${pageId}?body-format=storage`;
-        const pageData = await this.requestConfluence<ConfluencePageResponse>(url, 'GET');
+        // Several vault paths can point at the same Confluence page ID (a known artifact of
+        // this plugin's earlier, buggier sync history). Serialize operations per page ID so two
+        // concurrent tasks never race the same page's version number into a 409 — different
+        // page IDs still run fully concurrently.
+        await this.withPageLock(pageId, async () => {
+          // Fetch current page content — must request body-format=storage explicitly
+          const url = `${this.getConfluenceBaseUrl()}/api/v2/pages/${pageId}?body-format=storage`;
+          const pageData = await this.requestConfluence<ConfluencePageResponse>(url, 'GET');
 
-        // Check stop again after async GET (more responsive)
-        if (!this.isSyncing) {
-          await this.saveSyncState();
-          new Notice(`⏹️ Link update paused. ${updated} pages updated so far.`);
-          return;
-        }
+          if (!pageData.body?.storage?.value) {
+            this.logger.info(`[updateAllPageLinks] Page ${title} (${pageId}) has no body, skipping`, true);
+            return;
+          }
 
-        if (!pageData.body?.storage?.value) {
-          this.logger.info(`[updateAllPageLinks] Page ${title} (${pageId}) has no body, skipping`, true);
-          continue;
-        }
+          let content = pageData.body.storage.value;
+          let hasLinks = false;
 
-        let content = pageData.body.storage.value;
-        let hasLinks = false;
-
-        // Exact lookup by full obsidian path — no heuristics needed because placeholders
-        // already carry the full path (set during Phase 1 buildMarkdownBody via nameToPath).
-        const resolveLink = (obsidianPath: string): string | null => {
-          const clean = obsidianPath.trim();
-          const id = this.pageMap[clean];
-          if (id) return id;
-          this.logger.warn(`[updateAllPageLinks] Unresolved link: ${clean}`);
-          return null;
-        };
-
-        // Build Confluence URL using page ID only — title slug is optional and caused wrong URLs
-        // when pageName included a folder path like "08 - Reference/System Messages"
-        const buildUrl = (resolvedPageId: string): string => {
-          const baseUrl = this.getConfluenceBaseUrl().replace(/\/wiki$/, '');
-          return `${baseUrl}/wiki/spaces/${this.settings.spaceKey}/pages/${resolvedPageId}`;
-        };
-
-        // Fix previously-generated wrong URLs that included folder path in slug
-        // Pattern: /pages/{id}/{segment1}/{segment2} — invalid, fix to /pages/{id}
-        const confBase = this.getConfluenceBaseUrl().replace(/\/wiki$/, '');
-        const escapedBase = confBase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const wrongUrlRe = new RegExp(
-          `href="${escapedBase}/wiki/spaces/${this.settings.spaceKey}/pages/(\\d+)/[^"/?]+/[^"/?]+"`,
-          'g'
-        );
-        content = content.replace(wrongUrlRe, (match: string, pid: string) => {
-          hasLinks = true;
-          return `href="${buildUrl(pid)}"`;
-        });
-
-        // Replace <a href="OBSIDIAN_LINK:pageName"> (marked parsed single-word links into real <a> tags)
-        content = content.replace(/href="OBSIDIAN_LINK:([^"]+)"/g, (match: string, pageName: string) => {
-          const pid = resolveLink(pageName);
-          if (pid) { hasLinks = true; return `href="${buildUrl(pid)}"`; }
-          return match;
-        });
-
-        // Replace [text](OBSIDIAN_LINK:pageName) (multi-word links marked left as plain text)
-        content = content.replace(/\[([^\]]+)\]\(OBSIDIAN_LINK:([^)]+)\)/g, (match: string, text: string, pageName: string) => {
-          const pid = resolveLink(pageName);
-          if (pid) { hasLinks = true; return `<a href="${buildUrl(pid)}">${text}</a>`; }
-          return match;
-        });
-
-        // If links were updated, save the page
-        if (hasLinks) {
-          const updatePayload: Record<string, unknown> = {
-            id: pageId,
-            status: 'current',
-            title: pageData.title, // use actual Confluence title, not the pageMap key (which is the vault path)
-            body: {
-              value: content,
-              representation: 'storage'
-            },
-            version: {
-              number: pageData.version.number + 1
-            }
+          // Exact lookup by full obsidian path — no heuristics needed because placeholders
+          // already carry the full path (set during Phase 1 buildMarkdownBody via nameToPath).
+          const resolveLink = (obsidianPath: string): string | null => {
+            const clean = obsidianPath.trim();
+            const id = this.pageMap[clean];
+            if (id) return id;
+            this.logger.warn(`[updateAllPageLinks] Unresolved link: ${clean}`);
+            return null;
           };
 
-          const updateUrl = `${this.getConfluenceBaseUrl()}/api/v2/pages/${pageId}`;
-          await this.requestConfluence<ConfluencePageResponse>(updateUrl, 'PUT', updatePayload);
-          updated++;
-          this.logger.info(`[updateAllPageLinks] ✅ Updated links in: ${title}`, true);
-        }
+          // Build Confluence URL using page ID only — title slug is optional and caused wrong URLs
+          // when pageName included a folder path like "08 - Reference/System Messages"
+          const buildUrl = (resolvedPageId: string): string => {
+            const baseUrl = this.getConfluenceBaseUrl().replace(/\/wiki$/, '');
+            return `${baseUrl}/wiki/spaces/${this.settings.spaceKey}/pages/${resolvedPageId}`;
+          };
+
+          // Fix previously-generated wrong URLs that included folder path in slug
+          // Pattern: /pages/{id}/{segment1}/{segment2} — invalid, fix to /pages/{id}
+          const confBase = this.getConfluenceBaseUrl().replace(/\/wiki$/, '');
+          const escapedBase = confBase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const wrongUrlRe = new RegExp(
+            `href="${escapedBase}/wiki/spaces/${this.settings.spaceKey}/pages/(\\d+)/[^"/?]+/[^"/?]+"`,
+            'g'
+          );
+          content = content.replace(wrongUrlRe, (match: string, pid: string) => {
+            hasLinks = true;
+            return `href="${buildUrl(pid)}"`;
+          });
+
+          // Replace <a href="OBSIDIAN_LINK:pageName"> (marked parsed single-word links into real <a> tags)
+          content = content.replace(/href="OBSIDIAN_LINK:([^"]+)"/g, (match: string, pageName: string) => {
+            const pid = resolveLink(pageName);
+            if (pid) { hasLinks = true; return `href="${buildUrl(pid)}"`; }
+            return match;
+          });
+
+          // Replace [text](OBSIDIAN_LINK:pageName) (multi-word links marked left as plain text)
+          content = content.replace(/\[([^\]]+)\]\(OBSIDIAN_LINK:([^)]+)\)/g, (match: string, text: string, pageName: string) => {
+            const pid = resolveLink(pageName);
+            if (pid) { hasLinks = true; return `<a href="${buildUrl(pid)}">${text}</a>`; }
+            return match;
+          });
+
+          // If links were updated, save the page
+          if (hasLinks) {
+            const updatePayload: Record<string, unknown> = {
+              id: pageId,
+              status: 'current',
+              title: pageData.title, // use actual Confluence title, not the pageMap key (which is the vault path)
+              body: {
+                value: content,
+                representation: 'storage'
+              },
+              version: {
+                number: pageData.version.number + 1
+              }
+            };
+
+            const updateUrl = `${this.getConfluenceBaseUrl()}/api/v2/pages/${pageId}`;
+            await this.requestConfluence<ConfluencePageResponse>(updateUrl, 'PUT', updatePayload);
+            updated++;
+            this.logger.info(`[updateAllPageLinks] ✅ Updated links in: ${title}`, true);
+          }
+        });
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         this.logger.error(`[updateAllPageLinks] ❌ Failed to update ${title}: ${detail}`);
       }
+
+      processed += 1;
+      this.renderStatusBar(`updating links ${processed}/${total}`);
+    });
+
+    if (stoppedEarly) {
+      this.logger.info(`[updateAllPageLinks] Stopped by user. ${processed}/${total} processed before stopping.`);
+      await this.saveSyncState();
+      new Notice(`⏹️ Link update paused. ${updated} pages updated so far.`);
+      return;
     }
 
     new Notice(`🔗 Link update complete: ${updated} pages updated.`, 5000);
     this.logger.info(`[updateAllPageLinks] Phase 2 complete: ${updated} pages updated`);
+  }
+
+  // Serializes operations that target the same Confluence page ID, while letting operations on
+  // different page IDs run fully concurrently. A prior failure on this page ID never blocks
+  // later callers — it's swallowed here (the caller of the earlier operation still sees the
+  // real error; this is purely about not poisoning the queue for the next waiter).
+  private async withPageLock<T>(pageId: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.pageLocks.get(pageId) ?? Promise.resolve();
+    const run = previous.then(fn, fn);
+    this.pageLocks.set(pageId, run.then(() => undefined, () => undefined));
+    return run;
   }
 }

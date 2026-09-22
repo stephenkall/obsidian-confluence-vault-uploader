@@ -72,6 +72,14 @@ You never have to guess whether a sync is running, idle, or stuck:
 - The **log level** setting (Settings → Confluence Vault Uploader → Sync visibility) controls how much detail is captured: `None` (errors only), `Normal` (per-file progress), or `Verbose` (per-request detail, also mirrored to the developer console). Errors are always captured regardless of this setting.
 - If a sync is interrupted by an unexpected error, it no longer fails silently — a notice explains what happened, progress up to that point is saved, and the failure is recorded in the log and in the status panel's "last sync" summary.
 
+### Concurrent syncing
+
+Both sync phases can process multiple pages at once instead of strictly one at a time. Set **Sync concurrency** (Settings → Confluence Vault Uploader → Performance) to how many pages to sync simultaneously — 1 disables concurrency (original one-at-a-time behavior), higher values finish large vaults faster. A few things worth knowing:
+
+- Folder creation is safe under concurrency: if multiple files need the same not-yet-created parent folder at once, they share a single in-flight creation instead of racing to create it twice.
+- If Confluence responds with a rate limit (`429`), the sync automatically waits (honoring the server's `Retry-After` when given, or an exponential backoff otherwise) and retries — this is normal, self-correcting behavior at higher concurrency, not a failure.
+- If you're unsure what to pick, the default (4) is a reasonable balance; drop it to 1 if you want the original strictly-sequential behavior (e.g. for easier log reading), or if you're hitting persistent rate-limit errors even after the automatic backoff.
+
 ## Vault conventions
 
 ### Folder pages and MOC files
