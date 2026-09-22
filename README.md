@@ -111,6 +111,7 @@ All standard Obsidian link formats are supported and resolved to real Confluence
 - The sync is safe to re-run; existing pages are updated in place
 - Images embedded via `![[file.jpg]]` become links (Confluence image upload is not yet supported)
 - Task list items (`- [ ]` / `- [x]`) are converted to `☐`/`☑` plain text, since Confluence storage format does not support HTML checkbox elements
+- Confluence requires page titles to be unique within a space, regardless of folder structure — unlike a filesystem, which allows the same filename in different folders. If a file or folder name is used more than once in the vault (e.g. paired "logical"/"physical" exports sharing a GUID filename), that page's Confluence title is automatically prefixed with just enough of its parent path to make it unique (e.g. `seg_0/GUID.xml` instead of a bare `GUID.xml`), instead of failing with `Request failed, status 400`. This only affects the Confluence-visible title — internal link resolution always uses the full vault path, so links are unaffected. A page created before this behavior existed keeps its original bare title; there is nothing to clean up, since its now-unblocked counterpart simply gets its own disambiguated title going forward.
 
 ## Privacy & permissions
 

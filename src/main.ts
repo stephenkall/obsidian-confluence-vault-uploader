@@ -190,6 +190,10 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
   private pageMap: Record<string, string> = {}; // obsidianPath (no ext) → confluencePageId
   private nameToPath: Record<string, string> = {}; // basename (no ext) → full obsidian path (no ext)
   private pageVersions: Record<string, number> = {}; // pageId → version for updates
+  private duplicateBasenames: Set<string> = new Set(); // file basenames used by more than one vault file
+  private duplicateFolderNames: Set<string> = new Set(); // folder names used more than once in the vault
+  private fileTitleOverrides: Record<string, string> = {}; // file fullPath -> disambiguated Confluence title
+  private folderTitleOverrides: Record<string, string> = {}; // folder fullPath -> disambiguated Confluence title
   private isSyncing: boolean = false;
   private spaceId: string = '';
   private processedFiles: Set<string> = new Set(); // Track synced files for resumability
@@ -515,6 +519,77 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       }
     }
 
+    // Confluence requires page titles to be unique within a space, regardless of hierarchy —
+    // unlike the filesystem, which allows the same filename in different folders. Vaults that
+    // pair exports under the same base name in different folders (e.g. a "logical" and
+    // "physical" version of the same GUID-named file) would otherwise collide on creation with
+    // "Request failed, status 400". Detect any file basename or folder name that appears more
+    // than once in the vault, and disambiguate only those with their full vault path as the
+    // Confluence title instead of the bare name.
+    const basenameCounts = new Map<string, number>();
+    for (const f of files) {
+      basenameCounts.set(f.basename, (basenameCounts.get(f.basename) ?? 0) + 1);
+    }
+    this.duplicateBasenames = new Set(
+      Array.from(basenameCounts.entries()).filter(([, count]) => count > 1).map(([name]) => name)
+    );
+
+    const folderFullPaths = new Set<string>();
+    for (const f of files) {
+      const parts = f.path.replace(/\.md$/, '').split('/');
+      parts.pop();
+      let cur = '';
+      for (const part of parts) {
+        cur = cur ? `${cur}/${part}` : part;
+        folderFullPaths.add(cur);
+      }
+    }
+    const folderNameCounts = new Map<string, number>();
+    for (const folderPath of folderFullPaths) {
+      const name = folderPath.split('/').pop() ?? folderPath;
+      folderNameCounts.set(name, (folderNameCounts.get(name) ?? 0) + 1);
+    }
+    this.duplicateFolderNames = new Set(
+      Array.from(folderNameCounts.entries()).filter(([, count]) => count > 1).map(([name]) => name)
+    );
+
+    // Resolve each collision group to the shortest titles that are unique within that group —
+    // e.g. two files named "1B6494AC-....xml" under ".../Table/seg_0/" and ".../table/seg_2/"
+    // only need "seg_0/1B6494AC-....xml" and "seg_2/1B6494AC-....xml", not their full paths.
+    const fileGroups = new Map<string, string[]>();
+    for (const f of files) {
+      if (!this.duplicateBasenames.has(f.basename)) continue;
+      const fullPath = f.path.replace(/\.md$/, '');
+      const group = fileGroups.get(f.basename) ?? [];
+      group.push(fullPath);
+      fileGroups.set(f.basename, group);
+    }
+    this.fileTitleOverrides = {};
+    for (const paths of fileGroups.values()) {
+      Object.assign(this.fileTitleOverrides, this.resolveUniqueTitles(paths));
+    }
+
+    const folderGroups = new Map<string, string[]>();
+    for (const folderPath of folderFullPaths) {
+      const name = folderPath.split('/').pop() ?? folderPath;
+      if (!this.duplicateFolderNames.has(name)) continue;
+      const group = folderGroups.get(name) ?? [];
+      group.push(folderPath);
+      folderGroups.set(name, group);
+    }
+    this.folderTitleOverrides = {};
+    for (const paths of folderGroups.values()) {
+      Object.assign(this.folderTitleOverrides, this.resolveUniqueTitles(paths));
+    }
+
+    if (this.duplicateBasenames.size > 0 || this.duplicateFolderNames.size > 0) {
+      this.logger.warn(
+        `[Confluence Sync] ${this.duplicateBasenames.size} file name(s) and ${this.duplicateFolderNames.size} folder name(s) ` +
+          'are used more than once in the vault. Confluence requires unique page titles per space, so these will be titled ' +
+          'with their full vault path instead of just the name to avoid collisions.'
+      );
+    }
+
     this.logger.info(`[Confluence Sync] Starting: ${files.length} total files, ${this.processedFiles.size} already synced`);
     this.pageCache = {};
     let successCount = 0;
@@ -617,7 +692,8 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       this.logger.info(`[syncFile] Markdown preview: ${markdown.substring(0, 100)}...`, true);
     }
 
-    const title = file.basename;
+    const fullPath = file.path.replace(/\.md$/, '');
+    const title = this.fileTitleOverrides[fullPath] ?? file.basename;
     const body = this.buildMarkdownBody(markdown);
     this.logger.info(`[syncFile] Markdown body prepared (representation: ${body.representation})`, true);
 
@@ -658,10 +734,37 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     const pageId = await this.createOrUpdatePage(title, body, parentId);
 
     // Register by full obsidian path (no extension) — the key format Phase 2 will look up
-    const fullPath = file.path.replace(/\.md$/, ''); // e.g. "01 - Overview/System Landscape"
     this.pageMap[fullPath] = pageId;
 
     this.logger.info(`[syncFile] ✅ Completed: ${file.path} → Confluence page ${pageId} (parent: ${parentId || 'root'})`, true);
+  }
+
+  // Given a group of full vault paths that all end in the same basename, returns the shortest
+  // "last N path segments" title for each path that is unique across the whole group. Since
+  // full paths are inherently unique, this always terminates (at worst, depth == full path).
+  private resolveUniqueTitles(paths: string[]): Record<string, string> {
+    const result: Record<string, string> = {};
+    const partsByPath = new Map(paths.map(p => [p, p.split('/')] as const));
+    const maxDepth = Math.max(...paths.map(p => partsByPath.get(p)?.length ?? 1));
+
+    for (let depth = 1; depth <= maxDepth; depth++) {
+      const candidateByPath = new Map<string, string>();
+      const countByCandidate = new Map<string, number>();
+      for (const p of paths) {
+        const parts = partsByPath.get(p) ?? [p];
+        const candidate = parts.slice(Math.max(0, parts.length - depth)).join('/');
+        candidateByPath.set(p, candidate);
+        countByCandidate.set(candidate, (countByCandidate.get(candidate) ?? 0) + 1);
+      }
+
+      const allUnique = Array.from(countByCandidate.values()).every(count => count === 1);
+      if (allUnique || depth === maxDepth) {
+        for (const [p, title] of candidateByPath) result[p] = title;
+        break;
+      }
+    }
+
+    return result;
   }
 
   private removeFrontmatter(markdown: string): string {
@@ -694,7 +797,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
 
       if (!this.pageCache[currentPath]) {
         const parentPageId = parentId || this.settings.rootPageId || '';
-        const pageId = await this.findOrCreateFolderPage(part, parentPageId);
+        const pageId = await this.findOrCreateFolderPage(part, parentPageId, currentPath);
         this.pageCache[currentPath] = { id: pageId, version: 1 };
         // Register folder by full vault path so Phase 2 resolves [[FolderName]] links exactly
         this.pageMap[currentPath] = pageId;
@@ -706,28 +809,32 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     return parentId;
   }
 
-  private async findOrCreateFolderPage(folderName: string, parentPageId: string): Promise<string> {
-    this.logger.info(`[findOrCreateFolderPage] Looking for folder: ${folderName} (parent: ${parentPageId || 'root'})`, true);
-    const existing = await this.findPageByTitle(folderName, parentPageId);
+  private async findOrCreateFolderPage(folderName: string, parentPageId: string, folderFullPath: string): Promise<string> {
+    // Confluence titles must be unique per space; use a disambiguated title when this folder
+    // name collides with another folder elsewhere in the vault (see duplicateFolderNames).
+    const title = this.folderTitleOverrides[folderFullPath] ?? folderName;
+
+    this.logger.info(`[findOrCreateFolderPage] Looking for folder: ${title} (parent: ${parentPageId || 'root'})`, true);
+    const existing = await this.findPageByTitle(title, parentPageId);
     if (existing) {
-      this.logger.info(`[findOrCreateFolderPage] Found existing folder: ${folderName} (id: ${existing.id})`, true);
+      this.logger.info(`[findOrCreateFolderPage] Found existing folder: ${title} (id: ${existing.id})`, true);
       // Register folder page so Phase 2 can resolve its links
       this.pageMap[folderName] = existing.id;
       return existing.id;
     }
 
-    this.logger.info(`[findOrCreateFolderPage] Creating new folder: ${folderName}`);
+    this.logger.info(`[findOrCreateFolderPage] Creating new folder: ${title}`);
     const url = `${this.getConfluenceBaseUrl()}/api/v2/pages`;
     const payload: Record<string, unknown> = {
       spaceId: this.spaceId,
       status: 'current',
-      title: folderName,
+      title,
       body: { value: '', representation: 'storage' }
     };
     if (parentPageId) payload.parentId = parentPageId;
 
     const response = await this.requestConfluence<ConfluencePageResponse>(url, 'POST', payload);
-    this.logger.info(`[findOrCreateFolderPage] Created folder: ${folderName} (id: ${response.id})`);
+    this.logger.info(`[findOrCreateFolderPage] Created folder: ${title} (id: ${response.id})`);
     // Register folder page so Phase 2 can resolve its links
     this.pageMap[folderName] = response.id;
     return response.id;
