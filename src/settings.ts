@@ -12,6 +12,7 @@ export interface ConfluenceVaultUploaderSettings {
   rootPageTitle?: string;
   rootPageUrl?: string;
   logLevel: LogLevel;
+  syncConcurrency: number;
 }
 
 export const DEFAULT_SETTINGS: ConfluenceVaultUploaderSettings = {
@@ -22,7 +23,8 @@ export const DEFAULT_SETTINGS: ConfluenceVaultUploaderSettings = {
   rootPageId: '',
   rootPageTitle: '',
   rootPageUrl: '',
-  logLevel: 'normal'
+  logLevel: 'normal',
+  syncConcurrency: 4
 };
 
 export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
@@ -52,6 +54,10 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
     this.renderLogLevel(new Setting(containerEl));
     this.renderSyncStatus(new Setting(containerEl));
     this.renderRepairCache(new Setting(containerEl));
+
+    new Setting(containerEl).setName('Performance').setHeading();
+
+    this.renderSyncConcurrency(new Setting(containerEl));
   }
 
   getSettingDefinitions(): SettingDefinitionItem[] {
@@ -99,6 +105,17 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
             name: 'Repair sync cache',
             desc: 'Checks every cached page mapping against Confluence and removes stale entries.',
             render: (setting: Setting) => this.renderRepairCache(setting)
+          }
+        ]
+      },
+      {
+        type: 'group',
+        heading: 'Performance',
+        items: [
+          {
+            name: 'Sync concurrency',
+            desc: 'How many pages to sync at the same time.',
+            render: (setting: Setting) => this.renderSyncConcurrency(setting)
           }
         ]
       }
@@ -246,6 +263,25 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
         button.setButtonText('Repair cache').onClick(async () => {
           await this.plugin.repairSyncCache();
         })
+      );
+  }
+
+  private renderSyncConcurrency(setting: Setting): void {
+    setting
+      .setName('Sync concurrency')
+      .setDesc(
+        'How many pages to sync at the same time. Higher values finish large vaults faster but increase the risk of ' +
+          'hitting Confluence\'s rate limits (a 429 response), which the sync automatically waits out and retries. ' +
+          '1 disables concurrency entirely (one page at a time, matching the original behavior).'
+      )
+      .addDropdown(dropdown =>
+        dropdown
+          .addOptions({ '1': '1 (sequential)', '2': '2', '4': '4 (default)', '6': '6', '8': '8' })
+          .setValue(String(this.plugin.settings.syncConcurrency))
+          .onChange(async value => {
+            this.plugin.settings.syncConcurrency = Number(value);
+            await this.plugin.saveSettings();
+          })
       );
   }
 
