@@ -1,6 +1,8 @@
 import { App, PluginSettingTab, Setting, Notice, requestUrl } from 'obsidian';
 import ConfluenceVaultUploaderPlugin from './main';
 
+export type LogLevel = 'none' | 'normal' | 'verbose';
+
 export interface ConfluenceVaultUploaderSettings {
   confluenceBaseUrl: string;
   username: string;
@@ -9,6 +11,7 @@ export interface ConfluenceVaultUploaderSettings {
   rootPageId: string;
   rootPageTitle?: string;
   rootPageUrl?: string;
+  logLevel: LogLevel;
 }
 
 export const DEFAULT_SETTINGS: ConfluenceVaultUploaderSettings = {
@@ -18,7 +21,8 @@ export const DEFAULT_SETTINGS: ConfluenceVaultUploaderSettings = {
   spaceKey: '',
   rootPageId: '',
   rootPageTitle: '',
-  rootPageUrl: ''
+  rootPageUrl: '',
+  logLevel: 'normal'
 };
 
 export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
@@ -123,6 +127,46 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
           .onClick(async () => {
             await this.testConnection();
           })
+      );
+
+    containerEl.createEl('h3', { text: 'Sync visibility' });
+
+    new Setting(containerEl)
+      .setName('Log level')
+      .setDesc(
+        'Controls how much detail is recorded in the sync log (see "Show Confluence sync log" command). ' +
+          'Errors are always recorded regardless of this setting. Verbose also prints per-request details to the developer console.'
+      )
+      .addDropdown(dropdown =>
+        dropdown
+          .addOptions({ none: 'None', normal: 'Normal', verbose: 'Verbose' })
+          .setValue(this.plugin.settings.logLevel)
+          .onChange(async value => {
+            this.plugin.settings.logLevel = value as ConfluenceVaultUploaderSettings['logLevel'];
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName('Sync status')
+      .setDesc('Open the current sync status (also shown in the status bar and via the "Show Confluence sync status" command).')
+      .addButton(button =>
+        button.setButtonText('Show status').onClick(() => {
+          this.plugin.openStatusModal();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName('Repair sync cache')
+      .setDesc(
+        'Checks every cached page mapping against Confluence and removes stale entries (e.g. pages that were deleted, ' +
+          'or whose ID no longer resolves). Files affected by a removed mapping are queued for re-sync. Run this if you see ' +
+          '"Request failed, status 404" errors during sync.'
+      )
+      .addButton(button =>
+        button.setButtonText('Repair cache').onClick(async () => {
+          await this.plugin.repairSyncCache();
+        })
       );
   }
 
