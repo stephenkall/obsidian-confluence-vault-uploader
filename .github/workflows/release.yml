@@ -29,7 +29,10 @@ jobs:
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v1
         with:
-          subject-path: main.js
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
 
       - name: Create release
         uses: softprops/action-gh-release@v2

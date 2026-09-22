@@ -69,26 +69,20 @@ class SyncLogger {
     const level = this.getLevel();
     if (level === 'none') return;
     if (verboseOnly && level !== 'verbose') return;
+    // Informational and verbose activity is only recorded to the in-app buffer, viewable with
+    // "Show Confluence sync log" — it does not need a developer-console mirror.
     this.record('info', message);
-    // Only mirror to the console at the Verbose level — Normal-level activity is still
-    // fully available via "Show Confluence sync log" without spamming the console. This is
-    // the explicit, user-controlled behavior documented for the Verbose log level.
-    // eslint-disable-next-line no-console
-    if (level === 'verbose') console.log(message);
   }
 
   warn(message: string): void {
     if (this.getLevel() === 'none') return;
     this.record('warn', message);
-    // eslint-disable-next-line no-console
-    if (this.getLevel() === 'verbose') console.warn(message);
   }
 
   error(message: string): void {
     this.record('error', message);
-    // Sync failures must remain visible in the console even at the default log level —
-    // this is the last-resort diagnostic path when the in-app log viewer isn't open.
-    // eslint-disable-next-line no-console
+    // Sync failures remain visible in the console even at the default log level — this is the
+    // last-resort diagnostic path when the in-app log viewer isn't open.
     console.error(message);
   }
 
@@ -1191,7 +1185,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       // especially at higher sync concurrency settings — not a sync failure.
       const waitSeconds = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds : 2 ** (attempt - 1);
       this.logger.warn(`[requestConfluence] Rate limited (429) on ${method} ${url}, waiting ${waitSeconds}s before retry ${attempt}/${maxAttempts - 1}...`);
-      await new Promise(resolve => setTimeout(resolve, waitSeconds * 1000));
+      await new Promise(resolve => window.setTimeout(resolve, waitSeconds * 1000));
       return this.requestConfluence<T>(url, method, body, attempt + 1);
     }
 
