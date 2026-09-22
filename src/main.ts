@@ -586,13 +586,9 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       this.logger.warn(
         `[Confluence Sync] ${this.duplicateBasenames.size} file name(s) and ${this.duplicateFolderNames.size} folder name(s) ` +
           'are used more than once in the vault. Confluence requires unique page titles per space, so these will be titled ' +
-          'with their full vault path instead of just the name to avoid collisions.'
+          'with their full vault path instead of just the name to avoid collisions. A page that already synced under its old ' +
+          'bare title is left as-is (not automatically renamed) — this is purely cosmetic and does not affect sync correctness.'
       );
-      // A sibling in the same collision group may have already synced under its old bare title
-      // (from before this disambiguation existed, or simply because it happened to sync first).
-      // Rename it to match the same scheme so the whole group stays visually consistent, instead
-      // of leaving one page bare and the other disambiguated.
-      await this.reconcileDuplicateTitles({ ...this.fileTitleOverrides, ...this.folderTitleOverrides });
     }
 
     this.logger.info(`[Confluence Sync] Starting: ${files.length} total files, ${this.processedFiles.size} already synced`);
@@ -742,43 +738,6 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     this.pageMap[fullPath] = pageId;
 
     this.logger.info(`[syncFile] ✅ Completed: ${file.path} → Confluence page ${pageId} (parent: ${parentId || 'root'})`, true);
-  }
-
-  // For each path in a collision group that already has a known page ID (synced in a previous
-  // run, possibly before disambiguation existed, or simply because it happened to sync first),
-  // rename that Confluence page if its current title doesn't match the resolved disambiguated
-  // title — so every member of the group ends up styled the same way rather than one bare and
-  // one disambiguated. Paths with no known page ID yet are left alone; they get the right title
-  // on their first create.
-  private async reconcileDuplicateTitles(overrides: Record<string, string>): Promise<void> {
-    const entries = Object.entries(overrides).filter(([path]) => this.pageMap[path]);
-    if (entries.length === 0) return;
-
-    this.logger.info(`[Confluence Sync] Reconciling ${entries.length} page title(s) for naming consistency...`);
-    for (const [path, desiredTitle] of entries) {
-      const pageId = this.pageMap[path];
-      try {
-        const url = `${this.getConfluenceBaseUrl()}/api/v2/pages/${pageId}?body-format=storage`;
-        const pageData = await this.requestConfluence<ConfluencePageResponse>(url, 'GET');
-        if (pageData.title === desiredTitle) continue;
-
-        const payload: Record<string, unknown> = {
-          id: pageId,
-          status: 'current',
-          title: desiredTitle,
-          version: { number: pageData.version.number + 1 }
-        };
-        if (pageData.body?.storage) {
-          payload.body = { value: pageData.body.storage.value, representation: 'storage' };
-        }
-
-        await this.requestConfluence<ConfluencePageResponse>(`${this.getConfluenceBaseUrl()}/api/v2/pages/${pageId}`, 'PUT', payload);
-        this.logger.info(`[Confluence Sync] Renamed "${pageData.title}" → "${desiredTitle}" for naming consistency (${path})`);
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        this.logger.warn(`[Confluence Sync] Could not reconcile title for ${path}: ${detail}`);
-      }
-    }
   }
 
   // Given a group of full vault paths that all end in the same basename, returns the shortest
