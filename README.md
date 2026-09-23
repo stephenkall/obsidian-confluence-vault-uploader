@@ -62,6 +62,7 @@ After filling in the root page URL, a confirmation line shows the extracted spac
 | **Show Confluence sync log** | Opens the in-app sync log (respects the log level below), with copy-to-clipboard and clear actions. |
 | **Repair Confluence sync cache** | Validates every cached page mapping against Confluence and drops stale ones, queuing affected files for re-sync. Run this if sync reports `404` errors. |
 | **Reconcile Confluence page titles** | Renames already-synced pages whose title predates disambiguation (see below) to match their sibling's scheme. Opt-in — not run automatically on every sync. |
+| **Find Confluence pages not in vault** | Lists Confluence pages under your Root page that no longer correspond to anything in the vault (leftovers from older sync attempts), for review before deleting. See **Cleanup** below. |
 | **Clear Confluence sync cache** | Wipes all cached state; the next sync starts completely fresh. |
 | **Update Confluence page links (Phase 2)** | Re-runs only the cross-page link resolution step, without re-syncing page content. |
 
@@ -70,7 +71,7 @@ After filling in the root page URL, a confirmation line shows the extracted spac
 You never have to guess whether a sync is running, idle, or stuck:
 
 - The **status bar** (bottom of the Obsidian window) always shows the current state and updates per file during a sync. Click it to open the full status panel.
-- The **log level** setting (Settings → Confluence Vault Uploader → Sync visibility) controls how much detail is captured: `None` (errors only), `Normal` (per-file progress), or `Verbose` (per-request detail). Errors are always captured regardless of this setting. Sync failures are also printed to the developer console as a last resort even when the log viewer isn't open.
+- The **log level** setting (Settings → Confluence Vault Uploader → Sync visibility) controls how much detail is captured: `None` (errors only), `Normal` (per-file progress), or `Verbose` (per-request detail, also mirrored live to the developer console for active debugging). Errors are always captured regardless of this setting and always printed to the console.
 - If a sync is interrupted by an unexpected error, it no longer fails silently — a notice explains what happened, progress up to that point is saved, and the failure is recorded in the log and in the status panel's "last sync" summary.
 
 ### Concurrent syncing
@@ -81,7 +82,18 @@ Both sync phases can process multiple pages at once instead of strictly one at a
 - If Confluence responds with a rate limit (`429`), the sync automatically waits (honoring the server's `Retry-After` when given, or an exponential backoff otherwise) and retries — this is normal, self-correcting behavior at higher concurrency, not a failure.
 - If you're unsure what to pick, the default (4) is a reasonable balance; drop it to 1 if you want the original strictly-sequential behavior (e.g. for easier log reading), or if you're hitting persistent rate-limit errors even after the automatic backoff.
 
-## Vault conventions
+### Cleanup
+
+A sync only ever *adds or updates* pages — it never deletes anything on its own, even across many runs. If earlier (buggier) versions of this plugin left orphaned pages behind under old titles, those stay until you explicitly remove them.
+
+**Find Confluence pages not in vault** helps with exactly that: it walks every page under your configured Root page and compares it against what the vault currently produces, then shows a checklist of anything left over — before touching anything. A few safety rails are built in:
+
+- It only ever compares against the subtree under your **Root page URL** — never the whole space — so the blast radius is scoped to what this plugin actually manages. It refuses to run if no root page is configured.
+- It refuses to run until every file in the vault has been synced in the current session, so the comparison reflects the vault's actual current state rather than a partial one.
+- Nothing is deleted until you review the list and confirm — every item is checked by default, but you can uncheck any you want to keep.
+- Deleted pages go to **Confluence's Trash** (recoverable there for a retention period), not a permanent purge.
+
+This only prunes the Confluence side. It never creates, modifies, or deletes anything in your vault.
 
 ### Folder pages and MOC files
 

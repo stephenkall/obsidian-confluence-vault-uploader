@@ -56,6 +56,10 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
     this.renderRepairCache(new Setting(containerEl));
     this.renderReconcileTitles(new Setting(containerEl));
 
+    new Setting(containerEl).setName('Cleanup').setHeading();
+
+    this.renderFindOrphanedPages(new Setting(containerEl));
+
     new Setting(containerEl).setName('Performance').setHeading();
 
     this.renderSyncConcurrency(new Setting(containerEl));
@@ -111,6 +115,17 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
             name: 'Reconcile page titles',
             desc: 'Renames already-synced pages to match the disambiguated title scheme.',
             render: (setting: Setting) => this.renderReconcileTitles(setting)
+          }
+        ]
+      },
+      {
+        type: 'group',
+        heading: 'Cleanup',
+        items: [
+          {
+            name: 'Find pages not in vault',
+            desc: 'Lists Confluence pages under the root that no longer correspond to anything in the vault, for review before deleting.',
+            render: (setting: Setting) => this.renderFindOrphanedPages(setting)
           }
         ]
       },
@@ -234,7 +249,7 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
       .setName('Log level')
       .setDesc(
         'Controls how much detail is recorded in the sync log (see "Show Confluence sync log" command). ' +
-          'Errors are always recorded regardless of this setting.'
+          'Errors are always recorded regardless of this setting. Verbose also mirrors info/warn activity to the developer console.'
       )
       .addDropdown(dropdown =>
         dropdown
@@ -285,6 +300,22 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
       .addButton(button =>
         button.setButtonText('Reconcile titles').onClick(async () => {
           await this.plugin.reconcileDuplicateTitles();
+        })
+      );
+  }
+
+  private renderFindOrphanedPages(setting: Setting): void {
+    setting
+      .setName('Find pages not in vault')
+      .setDesc(
+        'Lists Confluence pages under your configured Root page that no longer correspond to anything in the vault — ' +
+          'leftovers from older sync attempts. Requires a Root page URL to be set and a fully completed sync first, so the ' +
+          'comparison is accurate. Shows a preview you confirm before anything happens; deleted pages go to Confluence\'s ' +
+          'Trash (recoverable there), never a permanent purge.'
+      )
+      .addButton(button =>
+        button.setButtonText('Find orphaned pages').onClick(async () => {
+          await this.plugin.findOrphanedConfluencePages();
         })
       );
   }
