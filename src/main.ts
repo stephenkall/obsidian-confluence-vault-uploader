@@ -1040,6 +1040,45 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     }
   }
 
+  // Cleans up a raw [[link]]/![[embed]] target extracted from vault content so authoring quirks
+  // don't prevent it from matching the vault's own forward-slash, extension-less path keys:
+  // Windows-style backslash separators (from content generated/copied on Windows) and an
+  // explicit trailing .md (or .sql.md, etc.) baked into the link text, which Obsidian's own
+  // wikilinks never include.
+  private normalizeLinkTarget(raw: string): string {
+    let normalized = raw.trim().replace(/\\/g, '/');
+    if (/\.md$/i.test(normalized)) {
+      normalized = normalized.slice(0, -3);
+    }
+    return normalized;
+  }
+
+  // Looks up `target` directly, then — if that misses — retries with the last path segment
+  // prefixed by "_". This plugin's own convention names a folder's content file with a leading
+  // underscore (e.g. "_Integrations MOC.md"), but links authored in the vault commonly reference
+  // the display name without it (e.g. "[[Integrations MOC]]").
+  private resolveWithUnderscoreFallback(target: string, lookup: (key: string) => string | undefined): string | undefined {
+    const direct = lookup(target);
+    if (direct) return direct;
+
+    const parts = target.split('/');
+    const last = parts[parts.length - 1];
+    if (last && !last.startsWith('_')) {
+      const withUnderscore = [...parts.slice(0, -1), `_${last}`].join('/');
+      return lookup(withUnderscore);
+    }
+    return undefined;
+  }
+
+  // Resolves raw [[link]]/![[embed]] text (bare name or partial path) to the full vault path,
+  // via nameToPath's suffix index (every trailing suffix of every file's path, so both
+  // "System Landscape" and "Book-In/Book-In Overview" resolve) plus the underscore fallback for
+  // MOC-style links. Falls back to the normalized-but-unresolved text if nothing matches.
+  private resolveVaultPathFromLinkText(raw: string): string {
+    const clean = this.normalizeLinkTarget(raw);
+    return this.resolveWithUnderscoreFallback(clean, key => this.nameToPath[key]) ?? clean;
+  }
+
   // Given a group of full vault paths that all end in the same basename, returns the shortest
   // "last N path segments" title for each path that is unique across the whole group. Since
   // full paths are inherently unique, this always terminates (at worst, depth == full path).
@@ -1174,12 +1213,7 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     processedMarkdown = processedMarkdown.replace(/^(\s*[-*+])\s+\[[xX]\]\s+/gm, '$1 ☑ ');
 
     // Resolve any Obsidian link (bare name or partial path) to the full vault path.
-    // nameToPath contains every suffix of every file path, so both "System Landscape" and
-    // "Book-In/Book-In Overview" resolve to their full vault paths.
-    const resolveObsidianPath = (name: string): string => {
-      const clean = name.trim();
-      return this.nameToPath[clean] ?? clean;
-    };
+    const resolveObsidianPath = (name: string): string => this.resolveVaultPathFromLinkText(name);
 
     // Convert Obsidian embeds ![[File]] to links — Phase 2 will resolve them to Confluence URLs.
     // Placeholder uses full vault path so Phase 2 lookup is unambiguous.
@@ -1605,12 +1639,26 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
           let content = pageData.body.storage.value;
           let hasLinks = false;
 
-          // Exact lookup by full obsidian path — no heuristics needed because placeholders
-          // already carry the full path (set during Phase 1 buildMarkdownBody via nameToPath).
+          // Placeholders normally already carry the full, clean vault path (set during Phase 1
+          // buildMarkdownBody). But a page synced before that normalization existed still has
+          // whatever raw text was baked into its stored Confluence content at the time — e.g. a
+          // bare MOC-style link like "Integrations MOC" rather than the folder-qualified
+          // "04 - Integrations/_Integrations MOC". Re-resolving via nameToPath (the same
+          // suffix-index resolution Phase 1 uses) reconstructs the full path from just the bare
+          // name, which a same-key underscore tweak alone can't do. This lets a page pick up the
+          // fix without needing its source file re-synced (e.g. after a cache clear).
           const resolveLink = (obsidianPath: string): string | null => {
-            const clean = obsidianPath.trim();
-            const id = this.pageMap[clean];
+            const clean = this.normalizeLinkTarget(obsidianPath);
+
+            let id = this.resolveWithUnderscoreFallback(clean, key => this.pageMap[key]);
             if (id) return id;
+
+            const resolvedFullPath = this.resolveVaultPathFromLinkText(obsidianPath);
+            if (resolvedFullPath !== clean) {
+              id = this.pageMap[resolvedFullPath];
+              if (id) return id;
+            }
+
             this.logger.warn(`[updateAllPageLinks] Unresolved link: ${clean}`);
             return null;
           };
