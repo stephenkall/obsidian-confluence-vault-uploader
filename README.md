@@ -17,12 +17,26 @@ Sync your entire Obsidian vault to Confluence, preserving the folder structure a
 
 ## Installation
 
-> **Not yet in Obsidian's official Community Plugins directory** (submission pending — see below). Install manually for now. Because Obsidian's built-in "Check for updates" only manages plugins installed through that official directory, a manually installed copy will **not** auto-update; repeat these steps for each new release, or watch/star the repo for release notifications.
+> **Not yet in Obsidian's official Community Plugins directory** (submission pending). Use one of the methods below in the meantime.
+
+### Option A: BRAT (recommended — gets you real auto-updates)
+
+Obsidian's built-in "Check for updates" only manages plugins installed through the official Community Plugins directory, so a manually installed copy of this plugin (Option B) will **not** auto-update. [BRAT](https://github.com/TfTHacker/obsidian42-brat) (Beta Reviewers Auto-update Tool) is a community plugin that installs and auto-updates plugins directly from their GitHub repo, without requiring the official listing — it works with this repo's releases as-is, with nothing special to configure.
+
+1. Install **BRAT** from Obsidian's Community Plugins browser (Settings → Community plugins → Browse → search "BRAT") and enable it.
+2. Open BRAT's settings and choose **Add Beta Plugin**.
+3. Enter this repo: `stephenkall/obsidian-confluence-vault-uploader`, and confirm.
+4. Enable **Confluence Vault Uploader** under Community plugins.
+
+From then on, BRAT checks this repo's GitHub Releases for you and can update the plugin automatically — no manual re-download needed for future versions.
+
+### Option B: Manual install
 
 1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/stephenkall/obsidian-confluence-vault-uploader/releases)
 2. Create the folder `<your-vault>/.obsidian/plugins/confluence-vault-uploader/` — the folder name must match the `id` in `manifest.json` (`confluence-vault-uploader`)
 3. Copy all three files into that folder
 4. In Obsidian: **Settings → Community plugins → reload**, then enable **Confluence Vault Uploader**
+5. Repeat these steps for each new release — this method does not auto-update.
 
 **To build from source:**
 ```bash
