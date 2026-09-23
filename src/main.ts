@@ -1,4 +1,4 @@
-import { App, Modal, Notice, Plugin, RequestUrlParam, requestUrl, TFile, TFolder } from 'obsidian';
+import { App, Modal, Notice, Plugin, RequestUrlParam, requestUrl, Setting, TFile, TFolder } from 'obsidian';
 import { marked } from 'marked';
 import { ConfluenceVaultUploaderSettingTab, ConfluenceVaultUploaderSettings, DEFAULT_SETTINGS, LogLevel } from './settings';
 
@@ -76,14 +76,16 @@ class SyncLogger {
     const level = this.getLevel();
     if (level === 'none') return;
     if (verboseOnly && level !== 'verbose') return;
-    // Informational and verbose activity is only recorded to the in-app buffer, viewable with
-    // "Show Confluence sync log" — it does not need a developer-console mirror.
     this.record('info', message);
+    // Only mirror to the console at the Verbose level, so the default experience stays quiet —
+    // this is an explicit opt-in for active debugging, not the normal path.
+    if (level === 'verbose') console.log(message);
   }
 
   warn(message: string): void {
     if (this.getLevel() === 'none') return;
     this.record('warn', message);
+    if (this.getLevel() === 'verbose') console.warn(message);
   }
 
   error(message: string): void {
@@ -184,6 +186,53 @@ class SyncLogModal extends Modal {
   }
 }
 
+class OrphanedPagesModal extends Modal {
+  private readonly selected: Set<string>;
+
+  constructor(app: App, private readonly plugin: ConfluenceVaultUploaderPlugin, private readonly pages: Array<{ id: string; title: string }>) {
+    super(app);
+    this.selected = new Set(pages.map(p => p.id));
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl('h2', { text: `${this.pages.length} Confluence page(s) not found in the vault` });
+    contentEl.createEl('p', {
+      text: 'These will be moved to Confluence\'s Trash (recoverable there, not permanently deleted). Uncheck any you want to keep.',
+      cls: 'setting-item-description'
+    });
+
+    const list = contentEl.createDiv({ cls: 'confluence-uploader-orphan-list' });
+    for (const page of this.pages) {
+      new Setting(list)
+        .setName(page.title)
+        .setDesc(page.id)
+        .addToggle(toggle =>
+          toggle.setValue(true).onChange(value => {
+            if (value) this.selected.add(page.id);
+            else this.selected.delete(page.id);
+          })
+        );
+    }
+
+    const actions = contentEl.createDiv({ cls: 'confluence-uploader-modal-actions' });
+    const deleteButton = actions.createEl('button', { text: 'Move selected to Trash', cls: 'mod-warning' });
+    deleteButton.onclick = async () => {
+      deleteButton.disabled = true;
+      const ids = Array.from(this.selected);
+      this.close();
+      await this.plugin.deleteOrphanedPages(ids);
+    };
+    const cancelButton = actions.createEl('button', { text: 'Cancel' });
+    cancelButton.onclick = () => this.close();
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
 export default class ConfluenceVaultUploaderPlugin extends Plugin {
   settings: ConfluenceVaultUploaderSettings = DEFAULT_SETTINGS;
   readonly logger = new SyncLogger(() => this.settings.logLevel);
@@ -250,6 +299,12 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       id: 'reconcile-confluence-page-titles',
       name: 'Reconcile Confluence page titles',
       callback: async () => this.reconcileDuplicateTitles()
+    });
+
+    this.addCommand({
+      id: 'find-orphaned-confluence-pages',
+      name: 'Find Confluence pages not in vault',
+      callback: async () => this.findOrphanedConfluencePages()
     });
 
     this.addCommand({
@@ -510,6 +565,121 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
     const message = `🔧 Title reconciliation complete: ${renamed} renamed, ${failed} failed, ${candidates.length - renamed - failed} already consistent.`;
     new Notice(message, 7000);
     this.logger.info(`[Reconcile titles] ${message}`);
+  }
+
+  // Finds Confluence pages under the configured root that no longer correspond to anything in
+  // the vault — leftovers from older, buggier sync attempts that created pages under titles the
+  // current logic no longer uses. Read-only: only lists candidates. Requires a completed sync
+  // (every vault file already processed) so the comparison reflects the vault's actual current
+  // state, and requires a root page (never compares against the whole space) to keep the blast
+  // radius scoped to what this plugin actually manages.
+  async findOrphanedConfluencePages(): Promise<void> {
+    if (this.isSyncing) {
+      new Notice('⚠️ Cannot check for orphaned pages while a sync is running. Stop the sync first.');
+      return;
+    }
+    if (!this.validateSettings()) {
+      return;
+    }
+    if (!this.settings.rootPageId) {
+      new Notice('⚠️ This requires a Root page URL configured in settings, so the comparison is scoped to your vault\'s subtree only.', 8000);
+      return;
+    }
+
+    await this.loadSyncState();
+
+    const files = this.app.vault.getMarkdownFiles();
+    if (files.length === 0) {
+      new Notice('No markdown files found in the vault.');
+      return;
+    }
+
+    const unsynced = files.filter(f => !this.processedFiles.has(f.path));
+    if (unsynced.length > 0) {
+      new Notice(
+        `⚠️ ${unsynced.length} file(s) haven't been synced yet. Run a full "Sync vault to Confluence" first ` +
+          '(letting it finish completely), so this comparison reflects the vault\'s current state.',
+        8000
+      );
+      return;
+    }
+
+    new Notice('🔍 Scanning Confluence for pages not in the vault...');
+    this.logger.info('[Find orphaned pages] Listing all descendants of the root page');
+
+    let descendants: Array<{ id: string; title: string }>;
+    try {
+      descendants = await this.listAllDescendantPages(this.settings.rootPageId);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      new Notice(`❌ Could not list Confluence pages: ${detail}`, 7000);
+      this.logger.error(`[Find orphaned pages] ${detail}`);
+      return;
+    }
+
+    const knownIds = new Set(Object.values(this.pageMap));
+    knownIds.add(this.settings.rootPageId);
+    const orphaned = descendants.filter(p => !knownIds.has(p.id));
+
+    this.logger.info(`[Find orphaned pages] ${descendants.length} page(s) under root, ${orphaned.length} not accounted for by the vault`);
+
+    if (orphaned.length === 0) {
+      new Notice('✅ No extra pages found — Confluence matches the vault.', 5000);
+      return;
+    }
+
+    new OrphanedPagesModal(this.app, this, orphaned).open();
+  }
+
+  // Fetches every descendant of rootPageId (at any depth) via CQL's transitive `ancestor`
+  // match, paginating through all results.
+  private async listAllDescendantPages(rootPageId: string): Promise<Array<{ id: string; title: string }>> {
+    const results: Array<{ id: string; title: string }> = [];
+    const limit = 100;
+    let start = 0;
+
+    for (;;) {
+      const cql = encodeURIComponent(`ancestor=${rootPageId}`);
+      const url = `${this.getConfluenceBaseUrl()}/rest/api/content/search?cql=${cql}&limit=${limit}&start=${start}`;
+      const response = await this.requestConfluence<ConfluenceSearchResponse>(url, 'GET');
+      if (!response?.results || response.results.length === 0) break;
+      results.push(...response.results.map(r => ({ id: r.id, title: r.title })));
+      if (response.results.length < limit) break;
+      start += limit;
+    }
+
+    return results;
+  }
+
+  // Moves the given pages to Confluence's Trash (recoverable there, not a permanent purge).
+  async deleteOrphanedPages(pageIds: string[]): Promise<void> {
+    if (pageIds.length === 0) {
+      new Notice('No pages selected.');
+      return;
+    }
+
+    new Notice(`🗑️ Moving ${pageIds.length} page(s) to Confluence Trash...`);
+    this.logger.info(`[Prune] Moving ${pageIds.length} page(s) to Trash`);
+
+    let deleted = 0;
+    let failed = 0;
+    const concurrency = Math.max(1, this.settings.syncConcurrency || 1);
+
+    await this.runConcurrent(pageIds, concurrency, async pageId => {
+      try {
+        await this.requestConfluence<void>(`${this.getConfluenceBaseUrl()}/api/v2/pages/${pageId}`, 'DELETE');
+        deleted += 1;
+        this.logger.info(`[Prune] Moved page ${pageId} to Trash`);
+      } catch (error) {
+        failed += 1;
+        const detail = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`[Prune] Could not delete page ${pageId}: ${detail}`);
+      }
+    });
+
+    const message = `🗑️ Done: ${deleted} moved to Trash, ${failed} failed.`;
+    new Notice(message, 7000);
+    this.logger.info(`[Prune] ${message}`);
   }
 
   async syncVaultToConfluence() {
@@ -1337,6 +1507,11 @@ export default class ConfluenceVaultUploaderPlugin extends Plugin {
       requestError.status = response.status;
       requestError.body = errorMsg;
       throw requestError;
+    }
+    // DELETE (and some other calls) return 204 with an empty body — accessing .json on that
+    // would throw trying to parse an empty string as JSON.
+    if (response.status === 204 || !response.text) {
+      return undefined as T;
     }
     return response.json as T;
   }
