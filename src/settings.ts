@@ -83,12 +83,12 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
         render: (setting: Setting) => this.renderApiToken(setting)
       },
       {
-        name: 'Root page URL (Optional)',
+        name: 'Root page URL (optional)',
         desc: 'Paste the full page URL to sync from a specific page.',
         render: (setting: Setting) => this.renderRootPageUrl(setting)
       },
       {
-        name: 'Test Connection',
+        name: 'Test connection',
         desc: 'Verify Confluence credentials and page access',
         render: (setting: Setting) => this.renderTestConnection(setting)
       },
@@ -192,7 +192,7 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
 
   private renderRootPageUrl(setting: Setting): void {
     setting
-      .setName('Root page URL (Optional)')
+      .setName('Root page URL (optional)')
       .setDesc('Paste the full page URL to sync from a specific page. Leave empty to sync from space root. The space key will be extracted from the URL.')
       .addText(text =>
         text
@@ -233,7 +233,7 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
 
   private renderTestConnection(setting: Setting): void {
     setting
-      .setName('Test Connection')
+      .setName('Test connection')
       .setDesc('Verify Confluence credentials and page access')
       .addButton(button =>
         button
@@ -249,7 +249,7 @@ export class ConfluenceVaultUploaderSettingTab extends PluginSettingTab {
       .setName('Log level')
       .setDesc(
         'Controls how much detail is recorded in the sync log (see "Show Confluence sync log" command). ' +
-          'Errors are always recorded regardless of this setting. Verbose also mirrors info/warn activity to the developer console.'
+          'Errors are always recorded regardless of this setting.'
       )
       .addDropdown(dropdown =>
         dropdown

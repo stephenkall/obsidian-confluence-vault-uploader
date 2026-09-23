@@ -76,16 +76,15 @@ class SyncLogger {
     const level = this.getLevel();
     if (level === 'none') return;
     if (verboseOnly && level !== 'verbose') return;
+    // Obsidian's plugin guidelines require the console to show only errors by default — info
+    // and verbose activity is recorded to the in-app buffer only, viewable with "Show Confluence
+    // sync log", never mirrored to the console.
     this.record('info', message);
-    // Only mirror to the console at the Verbose level, so the default experience stays quiet —
-    // this is an explicit opt-in for active debugging, not the normal path.
-    if (level === 'verbose') console.log(message);
   }
 
   warn(message: string): void {
     if (this.getLevel() === 'none') return;
     this.record('warn', message);
-    if (this.getLevel() === 'verbose') console.warn(message);
   }
 
   error(message: string): void {
